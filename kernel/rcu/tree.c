@@ -718,11 +718,9 @@ static struct rcu_node *rcu_get_root(struct rcu_state *rsp)
 static int rcu_future_needs_gp(struct rcu_state *rsp)
 {
 	struct rcu_node *rnp = rcu_get_root(rsp);
-	int idx = (READ_ONCE(rnp->completed) + 1) & 0x1;
-	int *fp = &rnp->need_future_gp[idx];
 
 	lockdep_assert_irqs_disabled();
-	return READ_ONCE(*fp);
+	return READ_ONCE(need_future_gp_element(rnp, rnp->completed));
 }
 
 /*
@@ -1234,10 +1232,10 @@ static int rcu_implicit_dynticks_qs(struct rcu_data *rdp)
 	}
 
 	/*
-	 * Has this CPU encountered a cond_resched_rcu_qs() since the
-	 * beginning of the grace period?  For this to be the case,
-	 * the CPU has to have noticed the current grace period.  This
-	 * might not be the case for nohz_full CPUs looping in the kernel.
+	 * Has this CPU encountered a cond_resched() since the beginning
+	 * of the grace period?  For this to be the case, the CPU has to
+	 * have noticed the current grace period.  This might not be the
+	 * case for nohz_full CPUs looping in the kernel.
 	 */
 	jtsq = jiffies_till_sched_qs;
 	ruqp = per_cpu_ptr(&rcu_dynticks.rcu_urgent_qs, rdp->cpu);
@@ -1642,6 +1640,21 @@ static unsigned long rcu_cbs_completed(struct rcu_state *rsp,
 		return rnp->completed + 1;
 
 	/*
+	 * If the current rcu_node structure believes that RCU is
+	 * idle, and if the rcu_state structure does not yet reflect
+	 * the start of a new grace period, then the next grace period
+	 * will suffice.  The memory barrier is needed to accurately
+	 * sample the rsp->gpnum, and pairs with the second lock
+	 * acquisition in rcu_gp_init(), which is augmented with
+	 * smp_mb__after_unlock_lock() for this purpose.
+	 */
+	if (rnp->gpnum == rnp->completed) {
+		smp_mb(); /* See above block comment. */
+		if (READ_ONCE(rsp->gpnum) == rnp->completed)
+			return rnp->completed + 1;
+	}
+
+	/*
 	 * Otherwise, wait for a possible partial grace period and
 	 * then the subsequent full grace period.
 	 */
@@ -1684,27 +1697,19 @@ rcu_start_future_gp(struct rcu_node *rnp, struct rcu_data *rdp,
 	 */
 	c = rcu_cbs_completed(rdp->rsp, rnp);
 	trace_rcu_future_gp(rnp, rdp, c, TPS("Startleaf"));
-	if (rnp->need_future_gp[c & 0x1]) {
+	if (need_future_gp_element(rnp, c)) {
 		trace_rcu_future_gp(rnp, rdp, c, TPS("Prestartleaf"));
 		goto out;
 	}
 
 	/*
-	 * If either this rcu_node structure or the root rcu_node structure
-	 * believe that a grace period is in progress, then we must wait
-	 * for the one following, which is in "c".  Because our request
-	 * will be noticed at the end of the current grace period, we don't
-	 * need to explicitly start one.  We only do the lockless check
-	 * of rnp_root's fields if the current rcu_node structure thinks
-	 * there is no grace period in flight, and because we hold rnp->lock,
-	 * the only possible change is when rnp_root's two fields are
-	 * equal, in which case rnp_root->gpnum might be concurrently
-	 * incremented.  But that is OK, as it will just result in our
-	 * doing some extra useless work.
+	 * If this rcu_node structure believes that a grace period is in
+	 * progress, then we must wait for the one following, which is in
+	 * "c".  Because our request will be noticed at the end of the
+	 * current grace period, we don't need to explicitly start one.
 	 */
-	if (rnp->gpnum != rnp->completed ||
-	    READ_ONCE(rnp_root->gpnum) != READ_ONCE(rnp_root->completed)) {
-		rnp->need_future_gp[c & 0x1]++;
+	if (rnp->gpnum != rnp->completed) {
+		need_future_gp_element(rnp, c)++;
 		trace_rcu_future_gp(rnp, rdp, c, TPS("Startedleaf"));
 		goto out;
 	}
@@ -1730,13 +1735,13 @@ rcu_start_future_gp(struct rcu_node *rnp, struct rcu_data *rdp,
 	 * If the needed for the required grace period is already
 	 * recorded, trace and leave.
 	 */
-	if (rnp_root->need_future_gp[c & 0x1]) {
+	if (need_future_gp_element(rnp_root, c)) {
 		trace_rcu_future_gp(rnp, rdp, c, TPS("Prestartedroot"));
 		goto unlock_out;
 	}
 
 	/* Record the need for the future grace period. */
-	rnp_root->need_future_gp[c & 0x1]++;
+	need_future_gp_element(rnp_root, c)++;
 
 	/* If a grace period is not already in progress, start one. */
 	if (rnp_root->gpnum != rnp_root->completed) {
@@ -1764,8 +1769,8 @@ static int rcu_future_gp_cleanup(struct rcu_state *rsp, struct rcu_node *rnp)
 	int needmore;
 	struct rcu_data *rdp = this_cpu_ptr(rsp->rda);
 
-	rnp->need_future_gp[c & 0x1] = 0;
-	needmore = rnp->need_future_gp[(c + 1) & 0x1];
+	need_future_gp_element(rnp, c) = 0;
+	needmore = need_future_gp_element(rnp, c + 1);
 	trace_rcu_future_gp(rnp, rdp, c,
 			    needmore ? TPS("CleanupMore") : TPS("Cleanup"));
 	return needmore;
@@ -2057,7 +2062,7 @@ static bool rcu_gp_init(struct rcu_state *rsp)
 					    rnp->level, rnp->grplo,
 					    rnp->grphi, rnp->qsmask);
 		raw_spin_unlock_irq_rcu_node(rnp);
-		cond_resched_rcu_qs();
+		cond_resched_tasks_rcu_qs();
 		WRITE_ONCE(rsp->gp_activity, jiffies);
 	}
 
@@ -2159,7 +2164,7 @@ static void rcu_gp_cleanup(struct rcu_state *rsp)
 		sq = rcu_nocb_gp_get(rnp);
 		raw_spin_unlock_irq_rcu_node(rnp);
 		rcu_nocb_gp_cleanup(sq);
-		cond_resched_rcu_qs();
+		cond_resched_tasks_rcu_qs();
 		WRITE_ONCE(rsp->gp_activity, jiffies);
 		rcu_gp_slow(rsp, gp_cleanup_delay);
 	}
@@ -2210,7 +2215,7 @@ static int __noreturn rcu_gp_kthread(void *arg)
 			/* Locking provides needed memory barrier. */
 			if (rcu_gp_init(rsp))
 				break;
-			cond_resched_rcu_qs();
+			cond_resched_tasks_rcu_qs();
 			WRITE_ONCE(rsp->gp_activity, jiffies);
 			WARN_ON(signal_pending(current));
 			trace_rcu_grace_period(rsp->name,
@@ -2255,7 +2260,7 @@ static int __noreturn rcu_gp_kthread(void *arg)
 				trace_rcu_grace_period(rsp->name,
 						       READ_ONCE(rsp->gpnum),
 						       TPS("fqsend"));
-				cond_resched_rcu_qs();
+				cond_resched_tasks_rcu_qs();
 				WRITE_ONCE(rsp->gp_activity, jiffies);
 				ret = 0; /* Force full wait till next FQS. */
 				j = jiffies_till_next_fqs;
@@ -2268,7 +2273,7 @@ static int __noreturn rcu_gp_kthread(void *arg)
 				}
 			} else {
 				/* Deal with stray signal. */
-				cond_resched_rcu_qs();
+				cond_resched_tasks_rcu_qs();
 				WRITE_ONCE(rsp->gp_activity, jiffies);
 				WARN_ON(signal_pending(current));
 				trace_rcu_grace_period(rsp->name,
@@ -2406,7 +2411,7 @@ rcu_report_qs_rnp(unsigned long mask, struct rcu_state *rsp,
 			return;
 		}
 		WARN_ON_ONCE(oldmask); /* Any child must be all zeroed! */
-		WARN_ON_ONCE(rnp->level != rcu_num_lvls - 1 &&
+		WARN_ON_ONCE(!rcu_is_leaf_node(rnp) &&
 			     rcu_preempt_blocked_readers_cgp(rnp));
 		rnp->qsmask &= ~mask;
 		trace_rcu_quiescent_state_report(rsp->name, rnp->gpnum,
@@ -2799,7 +2804,7 @@ static void force_qs_rnp(struct rcu_state *rsp, int (*f)(struct rcu_data *rsp))
 	struct rcu_node *rnp;
 
 	rcu_for_each_leaf_node(rsp, rnp) {
-		cond_resched_rcu_qs();
+		cond_resched_tasks_rcu_qs();
 		mask = 0;
 		raw_spin_lock_irqsave_rcu_node(rnp, flags);
 		if (rnp->qsmask == 0) {
@@ -4073,7 +4078,7 @@ static void __init rcu_init_one(struct rcu_state *rsp)
 
 	init_swait_queue_head(&rsp->gp_wq);
 	init_swait_queue_head(&rsp->expedited_wq);
-	rnp = rsp->level[rcu_num_lvls - 1];
+	rnp = rcu_first_leaf_node(rsp);
 	for_each_possible_cpu(i) {
 		while (i > rnp->grphi)
 			rnp++;
@@ -4185,6 +4190,7 @@ static void __init rcu_dump_rcu_node_tree(struct rcu_state *rsp)
 }
 
 struct workqueue_struct *rcu_gp_wq;
+struct workqueue_struct *rcu_par_gp_wq;
 
 void __init rcu_init(void)
 {
@@ -4216,6 +4222,8 @@ void __init rcu_init(void)
 	/* Create workqueue for expedited GPs and for Tree SRCU. */
 	rcu_gp_wq = alloc_workqueue("rcu_gp", WQ_POWER_EFFICIENT | WQ_MEM_RECLAIM, 0);
 	WARN_ON(!rcu_gp_wq);
+	rcu_par_gp_wq = alloc_workqueue("rcu_par_gp", WQ_MEM_RECLAIM, 0);
+	WARN_ON(!rcu_par_gp_wq);
 }
 
 #include "tree_exp.h"
