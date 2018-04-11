@@ -19,6 +19,9 @@
  *
  * Authors: Paul E. McKenney <paulmck@us.ibm.com>
  */
+
+#define pr_fmt(fmt) fmt
+
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -88,7 +91,7 @@ torture_param(int, nreaders, -1, "Number of RCU reader threads");
 torture_param(int, nwriters, -1, "Number of RCU updater threads");
 torture_param(bool, shutdown, !IS_ENABLED(MODULE),
 	      "Shutdown at end of performance tests.");
-torture_param(bool, verbose, true, "Enable verbose debugging printk()s");
+torture_param(int, verbose, 1, "Enable verbose debugging printk()s");
 torture_param(int, writer_holdoff, 0, "Holdoff (us) between GPs, zero to disable");
 
 static char *perf_type = "rcu";
@@ -135,8 +138,7 @@ struct rcu_perf_ops {
 	void (*cleanup)(void);
 	int (*readlock)(void);
 	void (*readunlock)(int idx);
-	unsigned long (*started)(void);
-	unsigned long (*completed)(void);
+	unsigned long (*get_gp_seq)(void);
 	unsigned long (*exp_completed)(void);
 	void (*async)(struct rcu_head *head, rcu_callback_t func);
 	void (*gp_barrier)(void);
@@ -176,8 +178,7 @@ static struct rcu_perf_ops rcu_ops = {
 	.init		= rcu_sync_perf_init,
 	.readlock	= rcu_perf_read_lock,
 	.readunlock	= rcu_perf_read_unlock,
-	.started	= rcu_batches_started,
-	.completed	= rcu_batches_completed,
+	.get_gp_seq	= rcu_get_gp_seq,
 	.exp_completed	= rcu_exp_batches_completed,
 	.async		= call_rcu,
 	.gp_barrier	= rcu_barrier,
@@ -206,8 +207,7 @@ static struct rcu_perf_ops rcu_bh_ops = {
 	.init		= rcu_sync_perf_init,
 	.readlock	= rcu_bh_perf_read_lock,
 	.readunlock	= rcu_bh_perf_read_unlock,
-	.started	= rcu_batches_started_bh,
-	.completed	= rcu_batches_completed_bh,
+	.get_gp_seq	= rcu_bh_get_gp_seq,
 	.exp_completed	= rcu_exp_batches_completed_sched,
 	.async		= call_rcu_bh,
 	.gp_barrier	= rcu_barrier_bh,
@@ -263,8 +263,7 @@ static struct rcu_perf_ops srcu_ops = {
 	.init		= rcu_sync_perf_init,
 	.readlock	= srcu_perf_read_lock,
 	.readunlock	= srcu_perf_read_unlock,
-	.started	= NULL,
-	.completed	= srcu_perf_completed,
+	.get_gp_seq	= srcu_perf_completed,
 	.exp_completed	= srcu_perf_completed,
 	.async		= srcu_call_rcu,
 	.gp_barrier	= srcu_rcu_barrier,
@@ -292,8 +291,7 @@ static struct rcu_perf_ops srcud_ops = {
 	.cleanup	= srcu_sync_perf_cleanup,
 	.readlock	= srcu_perf_read_lock,
 	.readunlock	= srcu_perf_read_unlock,
-	.started	= NULL,
-	.completed	= srcu_perf_completed,
+	.get_gp_seq	= srcu_perf_completed,
 	.exp_completed	= srcu_perf_completed,
 	.async		= srcu_call_rcu,
 	.gp_barrier	= srcu_rcu_barrier,
@@ -322,8 +320,7 @@ static struct rcu_perf_ops sched_ops = {
 	.init		= rcu_sync_perf_init,
 	.readlock	= sched_perf_read_lock,
 	.readunlock	= sched_perf_read_unlock,
-	.started	= rcu_batches_started_sched,
-	.completed	= rcu_batches_completed_sched,
+	.get_gp_seq	= rcu_sched_get_gp_seq,
 	.exp_completed	= rcu_exp_batches_completed_sched,
 	.async		= call_rcu_sched,
 	.gp_barrier	= rcu_barrier_sched,
@@ -350,8 +347,7 @@ static struct rcu_perf_ops tasks_ops = {
 	.init		= rcu_sync_perf_init,
 	.readlock	= tasks_perf_read_lock,
 	.readunlock	= tasks_perf_read_unlock,
-	.started	= rcu_no_completed,
-	.completed	= rcu_no_completed,
+	.get_gp_seq	= rcu_no_completed,
 	.async		= call_rcu_tasks,
 	.gp_barrier	= rcu_barrier_tasks,
 	.sync		= synchronize_rcu_tasks,
@@ -442,8 +438,7 @@ rcu_perf_writer(void *arg)
 			b_rcu_perf_writer_started =
 				cur_ops->exp_completed() / 2;
 		} else {
-			b_rcu_perf_writer_started =
-				cur_ops->completed();
+			b_rcu_perf_writer_started = cur_ops->get_gp_seq();
 		}
 	}
 
@@ -498,7 +493,7 @@ retry:
 						cur_ops->exp_completed() / 2;
 				} else {
 					b_rcu_perf_writer_finished =
-						cur_ops->completed();
+						cur_ops->get_gp_seq();
 				}
 				if (shutdown) {
 					smp_mb(); /* Assign before wake. */

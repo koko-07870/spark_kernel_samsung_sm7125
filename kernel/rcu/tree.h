@@ -87,6 +87,9 @@ struct rcu_node {
 	unsigned long completed; /* Last GP completed for this node. */
 				/*  This will either be equal to or one */
 				/*  behind the root rcu_node's gpnum. */
+	unsigned long gp_seq;	/* Track rsp->rcu_gp_seq. */
+	unsigned long gp_seq_needed; /* Track rsp->rcu_gp_seq_needed. */
+	unsigned long completedqs; /* All QSes done for this node. */
 	unsigned long qsmask;	/* CPUs or groups that need to switch in */
 				/*  order for current grace period to proceed.*/
 				/*  In leaf rcu_node, each bit corresponds to */
@@ -158,8 +161,6 @@ struct rcu_node {
 	struct swait_queue_head nocb_gp_wq[2];
 				/* Place for rcu_nocb_kthread() to wait GP. */
 #endif /* #ifdef CONFIG_RCU_NOCB_CPU */
-	int need_future_gp[2];
-				/* Counts of upcoming no-CB GP requests. */
 	raw_spinlock_t fqslock ____cacheline_internodealigned_in_smp;
 
 	spinlock_t exp_lock ____cacheline_internodealigned_in_smp;
@@ -168,21 +169,6 @@ struct rcu_node {
 	struct rcu_exp_work rew;
 	bool exp_need_flush;	/* Need to flush workitem? */
 } ____cacheline_internodealigned_in_smp;
-
-/* Accessors for ->need_future_gp[] array. */
-#define need_future_gp_mask() \
-	(ARRAY_SIZE(((struct rcu_node *)NULL)->need_future_gp) - 1)
-#define need_future_gp_element(rnp, c) \
-	((rnp)->need_future_gp[(c) & need_future_gp_mask()])
-#define need_any_future_gp(rnp)						\
-({									\
-	int __i;							\
-	bool __nonzero = false;						\
-									\
-	for (__i = 0; __i < ARRAY_SIZE((rnp)->need_future_gp); __i++)	\
-		__nonzero = __nonzero || (rnp)->need_future_gp[__i];	\
-	__nonzero;							\
-})
 
 /*
  * Bitmasks in an rcu_node cover the interval [grplo, grphi] of CPU IDs, and
@@ -210,6 +196,8 @@ struct rcu_data {
 					/*  in order to detect GP end. */
 	unsigned long	gpnum;		/* Highest gp number that this CPU */
 					/*  is aware of having started. */
+	unsigned long	gp_seq;		/* Track rsp->rcu_gp_seq counter. */
+	unsigned long	gp_seq_needed;	/* Track rsp->rcu_gp_seq_needed ctr. */
 	unsigned long	rcu_qs_ctr_snap;/* Snapshot of rcu_qs_ctr to check */
 					/*  for rcu_all_qs() invocations. */
 	union rcu_noqs	cpu_no_qs;	/* No QSes yet for this CPU. */
@@ -283,7 +271,7 @@ struct rcu_data {
 	/* ->rcu_iw* fields protected by leaf rcu_node ->lock. */
 	struct irq_work rcu_iw;		/* Check for non-irq activity. */
 	bool rcu_iw_pending;		/* Is ->rcu_iw pending? */
-	unsigned long rcu_iw_gpnum;	/* ->gpnum associated with ->rcu_iw. */
+	unsigned long rcu_iw_gp_seq;	/* ->gp_seq associated with ->rcu_iw. */
 
 	int cpu;
 	struct rcu_state *rsp;
@@ -342,6 +330,7 @@ struct rcu_state {
 						/* Subject to priority boost. */
 	unsigned long gpnum;			/* Current gp number. */
 	unsigned long completed;		/* # of last completed gp. */
+	unsigned long gp_seq;			/* Grace-period sequence #. */
 	struct task_struct *gp_kthread;		/* Task for grace periods. */
 	struct swait_queue_head gp_wq;		/* Where GP task waits. */
 	short gp_flags;				/* Commands for GP task. */
@@ -373,6 +362,8 @@ struct rcu_state {
 						/*  but in jiffies. */
 	unsigned long gp_activity;		/* Time of last GP kthread */
 						/*  activity in jiffies. */
+	unsigned long gp_req_activity;		/* Time of last GP request */
+						/*  in jiffies. */
 	unsigned long jiffies_stall;		/* Time at which to check */
 						/*  for CPU stalls. */
 	unsigned long jiffies_resched;		/* Time at which to resched */
@@ -453,6 +444,7 @@ static void rcu_preempt_check_blocked_tasks(struct rcu_node *rnp);
 static void rcu_preempt_check_callbacks(void);
 void call_rcu(struct rcu_head *head, rcu_callback_t func);
 static void __init __rcu_init_preempt(void);
+static void dump_blkd_tasks(struct rcu_node *rnp, int ncheck);
 static void rcu_initiate_boost(struct rcu_node *rnp, unsigned long flags);
 static void rcu_preempt_boost_start_gp(struct rcu_node *rnp);
 static void invoke_rcu_callbacks_kthread(void);
@@ -473,7 +465,6 @@ static void print_cpu_stall_info_end(void);
 static void zero_cpu_stall_ticks(struct rcu_data *rdp);
 static void increment_cpu_stall_ticks(void);
 static bool rcu_nocb_cpu_needs_barrier(struct rcu_state *rsp, int cpu);
-static void rcu_nocb_gp_set(struct rcu_node *rnp, int nrq);
 static struct swait_queue_head *rcu_nocb_gp_get(struct rcu_node *rnp);
 static void rcu_nocb_gp_cleanup(struct swait_queue_head *sq);
 static void rcu_init_one_nocb(struct rcu_node *rnp);

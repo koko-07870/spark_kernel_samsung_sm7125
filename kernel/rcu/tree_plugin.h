@@ -259,8 +259,10 @@ static void rcu_preempt_ctxt_queue(struct rcu_node *rnp, struct rcu_data *rdp)
 	 * ->exp_tasks pointers, respectively, to reference the newly
 	 * blocked tasks.
 	 */
-	if (!rnp->gp_tasks && (blkd_state & RCU_GP_BLKD))
+	if (!rnp->gp_tasks && (blkd_state & RCU_GP_BLKD)) {
 		rnp->gp_tasks = &t->rcu_node_entry;
+		WARN_ON_ONCE(rnp->completedqs == rnp->gp_seq);
+	}
 	if (!rnp->exp_tasks && (blkd_state & RCU_EXP_BLKD))
 		rnp->exp_tasks = &t->rcu_node_entry;
 	WARN_ON_ONCE(!(blkd_state & RCU_GP_BLKD) !=
@@ -534,6 +536,8 @@ void rcu_read_unlock_special(struct task_struct *t)
 		WARN_ON_ONCE(rnp != t->rcu_blocked_node);
 		WARN_ON_ONCE(!rcu_is_leaf_node(rnp));
 		empty_norm = !rcu_preempt_blocked_readers_cgp(rnp);
+		WARN_ON_ONCE(rnp->completedqs == rnp->gp_seq &&
+			     (!empty_norm || rnp->qsmask));
 		empty_exp = sync_rcu_preempt_exp_done(rnp);
 		smp_mb(); /* ensure expedited fastpath sees end of RCU c-s. */
 		np = rcu_next_node_entry(t, rnp);
@@ -696,7 +700,8 @@ static void rcu_preempt_check_blocked_tasks(struct rcu_node *rnp)
 	struct task_struct *t;
 
 	RCU_LOCKDEP_WARN(preemptible(), "rcu_preempt_check_blocked_tasks() invoked with preemption enabled!!!\n");
-	WARN_ON_ONCE(rcu_preempt_blocked_readers_cgp(rnp));
+	if (WARN_ON_ONCE(rcu_preempt_blocked_readers_cgp(rnp)))
+		dump_blkd_tasks(rnp, 10);
 	if (rcu_preempt_has_tasks(rnp)) {
 		rnp->gp_tasks = rnp->blkd_tasks.next;
 		t = container_of(rnp->gp_tasks, struct task_struct,
@@ -840,6 +845,27 @@ void exit_rcu(void)
 	__rcu_read_unlock();
 }
 
+/*
+ * Dump the blocked-tasks state, but limit the list dump to the
+ * specified number of elements.
+ */
+static void dump_blkd_tasks(struct rcu_node *rnp, int ncheck)
+{
+	int i;
+	struct list_head *lhp;
+
+	raw_lockdep_assert_held_rcu_node(rnp);
+	pr_info("%s: grp: %d-%d level: %d ->qamask %#lx ->gp_tasks %p ->boost_tasks %p ->exp_tasks %p &->blkd_tasks: %p offset: %u\n", __func__, rnp->grplo, rnp->grphi, rnp->level, rnp->qsmask, rnp->gp_tasks, rnp->boost_tasks, rnp->exp_tasks, &rnp->blkd_tasks, (unsigned int)offsetof(typeof(*rnp), blkd_tasks));
+	pr_cont("\t->blkd_tasks");
+	i = 0;
+	list_for_each(lhp, &rnp->blkd_tasks) {
+		pr_cont(" %p", lhp);
+		if (++i >= 10)
+			break;
+	}
+	pr_cont("\n");
+}
+
 #else /* #ifdef CONFIG_PREEMPT_RCU */
 
 static struct rcu_state *const rcu_state_p = &rcu_sched_state;
@@ -946,6 +972,14 @@ static void __init __rcu_init_preempt(void)
  */
 void exit_rcu(void)
 {
+}
+
+/*
+ * Dump the guaranteed-empty blocked-tasks state.  Trust but verify.
+ */
+static void dump_blkd_tasks(struct rcu_node *rnp, int ncheck)
+{
+	WARN_ON_ONCE(!list_empty(&rnp->blkd_tasks));
 }
 
 #endif /* #else #ifdef CONFIG_PREEMPT_RCU */
@@ -1432,7 +1466,8 @@ static bool __maybe_unused rcu_try_advance_all_cbs(void)
 		 * completed since we last checked and there are
 		 * callbacks not yet ready to invoke.
 		 */
-		if ((rdp->completed != rnp->completed ||
+		if ((rcu_seq_completed_gp(rdp->gp_seq,
+					  rcu_seq_current(&rnp->gp_seq)) ||
 		     unlikely(READ_ONCE(rdp->gpwrap))) &&
 		    rcu_segcblist_pend_cbs(&rdp->cblist))
 			note_gp_changes(rsp, rdp);
@@ -1719,15 +1754,15 @@ static void print_cpu_stall_info(struct rcu_state *rsp, int cpu)
 	 */
 	touch_nmi_watchdog();
 
-	if (rsp->gpnum == rdp->gpnum) {
+	ticks_value = rcu_seq_ctr(rsp->gp_seq - rdp->gp_seq);
+	if (ticks_value) {
+		ticks_title = "GPs behind";
+	} else {
 		ticks_title = "ticks this GP";
 		ticks_value = rdp->ticks_this_gp;
-	} else {
-		ticks_title = "GPs behind";
-		ticks_value = rsp->gpnum - rdp->gpnum;
 	}
 	print_cpu_stall_fast_no_hz(fast_no_hz, cpu);
-	delta = rdp->mynode->gpnum - rdp->rcu_iw_gpnum;
+	delta = rcu_seq_ctr(rdp->mynode->gp_seq - rdp->rcu_iw_gp_seq);
 	pr_err("\t%d-%c%c%c%c: (%lu %s) idle=%03x/%ld/%ld softirq=%u/%u fqs=%ld %s\n",
 	       cpu,
 	       "O."[!!cpu_online(cpu)],
@@ -1814,22 +1849,9 @@ static void rcu_nocb_gp_cleanup(struct swait_queue_head *sq)
 	swake_up_all(sq);
 }
 
-/*
- * Set the root rcu_node structure's ->need_future_gp field
- * based on the sum of those of all rcu_node structures.  This does
- * double-count the root rcu_node structure's requests, but this
- * is necessary to handle the possibility of a rcu_nocb_kthread()
- * having awakened during the time that the rcu_node structures
- * were being updated for the end of the previous grace period.
- */
-static void rcu_nocb_gp_set(struct rcu_node *rnp, int nrq)
-{
-	need_future_gp_element(rnp, rnp->completed + 1) += nrq;
-}
-
 static struct swait_queue_head *rcu_nocb_gp_get(struct rcu_node *rnp)
 {
-	return &rnp->nocb_gp_wq[rnp->completed & 0x1];
+	return &rnp->nocb_gp_wq[rcu_seq_ctr(rnp->gp_seq) & 0x1];
 }
 
 static void rcu_init_one_nocb(struct rcu_node *rnp)
@@ -2082,7 +2104,8 @@ static void rcu_nocb_wait_gp(struct rcu_data *rdp)
 	struct rcu_node *rnp = rdp->mynode;
 
 	raw_spin_lock_irqsave_rcu_node(rnp, flags);
-	needwake = rcu_start_future_gp(rnp, rdp, &c);
+	c = rcu_seq_snap(&rdp->rsp->gp_seq);
+	needwake = rcu_start_this_gp(rnp, rdp, c);
 	raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
 	if (needwake)
 		rcu_gp_kthread_wake(rdp->rsp);
@@ -2091,17 +2114,17 @@ static void rcu_nocb_wait_gp(struct rcu_data *rdp)
 	 * Wait for the grace period.  Do so interruptibly to avoid messing
 	 * up the load average.
 	 */
-	trace_rcu_future_gp(rnp, rdp, c, TPS("StartWait"));
+	trace_rcu_this_gp(rnp, rdp, c, TPS("StartWait"));
 	for (;;) {
 		swait_event_interruptible(
-			rnp->nocb_gp_wq[c & 0x1],
-			(d = ULONG_CMP_GE(READ_ONCE(rnp->completed), c)));
+			rnp->nocb_gp_wq[rcu_seq_ctr(c) & 0x1],
+			(d = rcu_seq_done(&rnp->gp_seq, c)));
 		if (likely(d))
 			break;
 		WARN_ON(signal_pending(current));
-		trace_rcu_future_gp(rnp, rdp, c, TPS("ResumeWait"));
+		trace_rcu_this_gp(rnp, rdp, c, TPS("ResumeWait"));
 	}
-	trace_rcu_future_gp(rnp, rdp, c, TPS("EndWait"));
+	trace_rcu_this_gp(rnp, rdp, c, TPS("EndWait"));
 	smp_mb(); /* Ensure that CB invocation happens after GP end. */
 }
 
@@ -2526,10 +2549,6 @@ static bool rcu_nocb_cpu_needs_barrier(struct rcu_state *rsp, int cpu)
 }
 
 static void rcu_nocb_gp_cleanup(struct swait_queue_head *sq)
-{
-}
-
-static void rcu_nocb_gp_set(struct rcu_node *rnp, int nrq)
 {
 }
 
