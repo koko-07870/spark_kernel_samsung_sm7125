@@ -108,6 +108,15 @@ static inline unsigned long rcu_seq_current(unsigned long *sp)
 }
 
 /*
+ * Given a snapshot from rcu_seq_snap(), determine whether or not the
+ * corresponding update-side operation has started.
+ */
+static inline bool rcu_seq_started(unsigned long *sp, unsigned long s)
+{
+	return ULONG_CMP_LT((s - 1) & ~RCU_SEQ_STATE_MASK, READ_ONCE(*sp));
+}
+
+/*
  * Given a snapshot from rcu_seq_snap(), determine whether or not a
  * full update-side operation has occurred.
  */
@@ -131,6 +140,15 @@ static inline bool rcu_seq_new_gp(unsigned long old, unsigned long new)
 {
 	return ULONG_CMP_LT((old + RCU_SEQ_STATE_MASK) & ~RCU_SEQ_STATE_MASK,
 			    new);
+}
+
+/*
+ * Roughly how many full grace periods have elapsed between the collection
+ * of the two specified grace periods?
+ */
+static inline unsigned long rcu_seq_diff(unsigned long new, unsigned long old)
+{
+	return (new - old) >> RCU_SEQ_CTR_SHIFT;
 }
 
 /*
