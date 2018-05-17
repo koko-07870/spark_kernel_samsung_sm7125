@@ -91,7 +91,17 @@ static inline void rcu_seq_end(unsigned long *sp)
 	WRITE_ONCE(*sp, rcu_seq_endval(sp));
 }
 
-/* Take a snapshot of the update side's sequence number. */
+/*
+ * rcu_seq_snap - Take a snapshot of the update side's sequence number.
+ *
+ * This function returns the earliest value of the grace-period sequence number
+ * that will indicate that a full grace period has elapsed since the current
+ * time.  Once the grace-period sequence number has reached this value, it will
+ * be safe to invoke all callbacks that have been registered prior to the
+ * current time. This value is the current grace-period number plus two to the
+ * power of the number of low-order bits reserved for state, then rounded up to
+ * the next value in which the state bits are all zero.
+ */
 static inline unsigned long rcu_seq_snap(unsigned long *sp)
 {
 	unsigned long s;
@@ -148,7 +158,20 @@ static inline bool rcu_seq_new_gp(unsigned long old, unsigned long new)
  */
 static inline unsigned long rcu_seq_diff(unsigned long new, unsigned long old)
 {
-	return (new - old) >> RCU_SEQ_CTR_SHIFT;
+	unsigned long rnd_diff;
+
+	if (old == new)
+		return 0;
+	/*
+	 * Compute the number of grace periods (still shifted up), plus
+	 * one if either of new and old is not an exact grace period.
+	 */
+	rnd_diff = (new & ~RCU_SEQ_STATE_MASK) -
+		   ((old + RCU_SEQ_STATE_MASK) & ~RCU_SEQ_STATE_MASK) +
+		   ((new & RCU_SEQ_STATE_MASK) || (old & RCU_SEQ_STATE_MASK));
+	if (ULONG_CMP_GE(RCU_SEQ_STATE_MASK, rnd_diff))
+		return 1; /* Definitely no grace period has elapsed. */
+	return ((rnd_diff - RCU_SEQ_STATE_MASK - 1) >> RCU_SEQ_CTR_SHIFT) + 2;
 }
 
 /*
@@ -444,7 +467,6 @@ enum rcutorture_type {
 #if defined(CONFIG_TREE_RCU) || defined(CONFIG_PREEMPT_RCU)
 void rcutorture_get_gp_data(enum rcutorture_type test_type, int *flags,
 			    unsigned long *gp_seq);
-void rcutorture_record_test_transition(void);
 void rcutorture_record_progress(unsigned long vernum);
 void do_trace_rcu_torture_read(const char *rcutorturename,
 			       struct rcu_head *rhp,
@@ -458,7 +480,6 @@ static inline void rcutorture_get_gp_data(enum rcutorture_type test_type,
 	*flags = 0;
 	*gp_seq = 0;
 }
-static inline void rcutorture_record_test_transition(void) { }
 static inline void rcutorture_record_progress(unsigned long vernum) { }
 #ifdef CONFIG_RCU_TRACE
 void do_trace_rcu_torture_read(const char *rcutorturename,
@@ -504,9 +525,8 @@ static inline void rcu_force_quiescent_state(void) { }
 static inline void rcu_bh_force_quiescent_state(void) { }
 static inline void rcu_sched_force_quiescent_state(void) { }
 static inline void show_rcu_gp_kthreads(void) { }
+static inline int rcu_get_gp_kthreads_prio(void) { return 0; }
 #else /* #ifdef CONFIG_TINY_RCU */
-extern unsigned long rcutorture_testseq;
-extern unsigned long rcutorture_vernum;
 unsigned long rcu_get_gp_seq(void);
 unsigned long rcu_bh_get_gp_seq(void);
 unsigned long rcu_sched_get_gp_seq(void);
@@ -514,6 +534,7 @@ unsigned long rcu_exp_batches_completed(void);
 unsigned long rcu_exp_batches_completed_sched(void);
 unsigned long srcu_batches_completed(struct srcu_struct *sp);
 void show_rcu_gp_kthreads(void);
+int rcu_get_gp_kthreads_prio(void);
 void rcu_force_quiescent_state(void);
 void rcu_bh_force_quiescent_state(void);
 void rcu_sched_force_quiescent_state(void);

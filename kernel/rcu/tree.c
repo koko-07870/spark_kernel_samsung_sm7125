@@ -183,6 +183,13 @@ module_param(gp_init_delay, int, 0444);
 static int gp_cleanup_delay;
 module_param(gp_cleanup_delay, int, 0444);
 
+/* Retreive RCU kthreads priority for rcutorture */
+int rcu_get_gp_kthreads_prio(void)
+{
+	return kthread_prio;
+}
+EXPORT_SYMBOL_GPL(rcu_get_gp_kthreads_prio);
+
 /*
  * Number of grace periods between delays, normalized by the duration of
  * the delay.  The longer the delay, the more the grace periods between
@@ -193,18 +200,6 @@ module_param(gp_cleanup_delay, int, 0444);
  * need for fast grace periods to increase other race probabilities.
  */
 #define PER_RCU_NODE_PERIOD 3	/* Number of grace periods between delays. */
-
-/*
- * Track the rcutorture test sequence number and the update version
- * number within a given test.  The rcutorture_testseq is incremented
- * on every rcutorture module load and unload, so has an odd value
- * when a test is running.  The rcutorture_vernum is set to zero
- * when rcutorture starts and is incremented on each rcutorture update.
- * These variables enable correlating rcutorture output with the
- * RCU tracing information.
- */
-unsigned long rcutorture_testseq;
-unsigned long rcutorture_vernum;
 
 /*
  * Compute the mask of online CPUs for the specified rcu_node structure.
@@ -510,8 +505,38 @@ static ulong jiffies_till_first_fqs = ULONG_MAX;
 static ulong jiffies_till_next_fqs = ULONG_MAX;
 static bool rcu_kick_kthreads;
 
-module_param(jiffies_till_first_fqs, ulong, 0644);
-module_param(jiffies_till_next_fqs, ulong, 0644);
+static int param_set_first_fqs_jiffies(const char *val, const struct kernel_param *kp)
+{
+	ulong j;
+	int ret = kstrtoul(val, 0, &j);
+
+	if (!ret)
+		WRITE_ONCE(*(ulong *)kp->arg, (j > HZ) ? HZ : j);
+	return ret;
+}
+
+static int param_set_next_fqs_jiffies(const char *val, const struct kernel_param *kp)
+{
+	ulong j;
+	int ret = kstrtoul(val, 0, &j);
+
+	if (!ret)
+		WRITE_ONCE(*(ulong *)kp->arg, (j > HZ) ? HZ : (j ?: 1));
+	return ret;
+}
+
+static struct kernel_param_ops first_fqs_jiffies_ops = {
+	.set = param_set_first_fqs_jiffies,
+	.get = param_get_ulong,
+};
+
+static struct kernel_param_ops next_fqs_jiffies_ops = {
+	.set = param_set_next_fqs_jiffies,
+	.get = param_get_ulong,
+};
+
+module_param_cb(jiffies_till_first_fqs, &first_fqs_jiffies_ops, &jiffies_till_first_fqs, 0644);
+module_param_cb(jiffies_till_next_fqs, &next_fqs_jiffies_ops, &jiffies_till_next_fqs, 0644);
 module_param(rcu_kick_kthreads, bool, 0644);
 
 /*
@@ -606,29 +631,36 @@ EXPORT_SYMBOL_GPL(rcu_sched_force_quiescent_state);
  */
 void show_rcu_gp_kthreads(void)
 {
+	int cpu;
+	struct rcu_data *rdp;
+	struct rcu_node *rnp;
 	struct rcu_state *rsp;
 
 	for_each_rcu_flavor(rsp) {
 		pr_info("%s: wait state: %d ->state: %#lx\n",
 			rsp->name, rsp->gp_state, rsp->gp_kthread->state);
+		rcu_for_each_node_breadth_first(rsp, rnp) {
+			if (ULONG_CMP_GE(rsp->gp_seq, rnp->gp_seq_needed))
+				continue;
+			pr_info("\trcu_node %d:%d ->gp_seq %lu ->gp_seq_needed %lu\n",
+				rnp->grplo, rnp->grphi, rnp->gp_seq,
+				rnp->gp_seq_needed);
+			if (!rcu_is_leaf_node(rnp))
+				continue;
+			for_each_leaf_node_possible_cpu(rnp, cpu) {
+				rdp = per_cpu_ptr(rsp->rda, cpu);
+				if (rdp->gpwrap ||
+				    ULONG_CMP_GE(rsp->gp_seq,
+						 rdp->gp_seq_needed))
+					continue;
+				pr_info("\tcpu %d ->gp_seq_needed %lu\n",
+					cpu, rdp->gp_seq_needed);
+			}
+		}
 		/* sched_show_task(rsp->gp_kthread); */
 	}
 }
 EXPORT_SYMBOL_GPL(show_rcu_gp_kthreads);
-
-/*
- * Record the number of times rcutorture tests have been initiated and
- * terminated.  This information allows the debugfs tracing stats to be
- * correlated to the rcutorture messages, even when the rcutorture module
- * is being repeatedly loaded and unloaded.  In other words, we cannot
- * store this state in rcutorture itself.
- */
-void rcutorture_record_test_transition(void)
-{
-	rcutorture_testseq++;
-	rcutorture_vernum = 0;
-}
-EXPORT_SYMBOL_GPL(rcutorture_record_test_transition);
 
 /*
  * Send along grace-period-related data for rcutorture diagnostics.
@@ -657,17 +689,6 @@ void rcutorture_get_gp_data(enum rcutorture_type test_type, int *flags,
 	*gp_seq = rcu_seq_current(&rsp->gp_seq);
 }
 EXPORT_SYMBOL_GPL(rcutorture_get_gp_data);
-
-/*
- * Record the number of writer passes through the current rcutorture test.
- * This is also used to correlate debugfs tracing stats with the rcutorture
- * messages.
- */
-void rcutorture_record_progress(unsigned long vernum)
-{
-	rcutorture_vernum++;
-}
-EXPORT_SYMBOL_GPL(rcutorture_record_progress);
 
 /*
  * Return the root node of the specified rcu_state structure.
@@ -2167,10 +2188,6 @@ static int __noreturn rcu_gp_kthread(void *arg)
 		/* Handle quiescent-state forcing. */
 		first_gp_fqs = true;
 		j = jiffies_till_first_fqs;
-		if (j > HZ) {
-			j = HZ;
-			jiffies_till_first_fqs = HZ;
-		}
 		ret = 0;
 		for (;;) {
 			if (!ret) {
@@ -2205,13 +2222,6 @@ static int __noreturn rcu_gp_kthread(void *arg)
 				WRITE_ONCE(rsp->gp_activity, jiffies);
 				ret = 0; /* Force full wait till next FQS. */
 				j = jiffies_till_next_fqs;
-				if (j > HZ) {
-					j = HZ;
-					jiffies_till_next_fqs = HZ;
-				} else if (j < 1) {
-					j = 1;
-					jiffies_till_next_fqs = 1;
-				}
 			} else {
 				/* Deal with stray signal. */
 				cond_resched_tasks_rcu_qs();
@@ -2770,6 +2780,7 @@ static void
 rcu_check_gp_start_stall(struct rcu_state *rsp, struct rcu_node *rnp,
 			 struct rcu_data *rdp)
 {
+	const unsigned long gpssdelay = rcu_jiffies_till_stall_check() * HZ;
 	unsigned long flags;
 	unsigned long j;
 	struct rcu_node *rnp_root = rcu_get_root(rsp);
@@ -2779,8 +2790,8 @@ rcu_check_gp_start_stall(struct rcu_state *rsp, struct rcu_node *rnp,
 	    ULONG_CMP_GE(rnp_root->gp_seq, rnp_root->gp_seq_needed))
 		return;
 	j = jiffies; /* Expensive access, and in common case don't get here. */
-	if (time_before(j, READ_ONCE(rsp->gp_req_activity) + HZ) ||
-	    time_before(j, READ_ONCE(rsp->gp_activity) + HZ) ||
+	if (time_before(j, READ_ONCE(rsp->gp_req_activity) + gpssdelay) ||
+	    time_before(j, READ_ONCE(rsp->gp_activity) + gpssdelay) ||
 	    atomic_read(&warned))
 		return;
 
@@ -2788,8 +2799,8 @@ rcu_check_gp_start_stall(struct rcu_state *rsp, struct rcu_node *rnp,
 	j = jiffies;
 	if (rcu_gp_in_progress(rsp) ||
 	    ULONG_CMP_GE(rnp_root->gp_seq, rnp_root->gp_seq_needed) ||
-	    time_before(j, READ_ONCE(rsp->gp_req_activity) + HZ) ||
-	    time_before(j, READ_ONCE(rsp->gp_activity) + HZ) ||
+	    time_before(j, READ_ONCE(rsp->gp_req_activity) + gpssdelay) ||
+	    time_before(j, READ_ONCE(rsp->gp_activity) + gpssdelay) ||
 	    atomic_read(&warned)) {
 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
 		return;
@@ -2801,18 +2812,18 @@ rcu_check_gp_start_stall(struct rcu_state *rsp, struct rcu_node *rnp,
 	j = jiffies;
 	if (rcu_gp_in_progress(rsp) ||
 	    ULONG_CMP_GE(rnp_root->gp_seq, rnp_root->gp_seq_needed) ||
-	    time_before(j, rsp->gp_req_activity + HZ) ||
-	    time_before(j, rsp->gp_activity + HZ) ||
+	    time_before(j, rsp->gp_req_activity + gpssdelay) ||
+	    time_before(j, rsp->gp_activity + gpssdelay) ||
 	    atomic_xchg(&warned, 1)) {
 		raw_spin_unlock_rcu_node(rnp_root); /* irqs remain disabled. */
 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
 		return;
 	}
-	pr_alert("%s: g%ld->%ld gar:%lu ga:%lu f%#x %s->state:%#lx\n",
+	pr_alert("%s: g%ld->%ld gar:%lu ga:%lu f%#x gs:%d %s->state:%#lx\n",
 		 __func__, (long)READ_ONCE(rsp->gp_seq),
 		 (long)READ_ONCE(rnp_root->gp_seq_needed),
 		 j - rsp->gp_req_activity, j - rsp->gp_activity,
-		 rsp->gp_flags, rsp->name,
+		 rsp->gp_flags, rsp->gp_state, rsp->name,
 		 rsp->gp_kthread ? rsp->gp_kthread->state : 0x1ffffL);
 	WARN_ON(1);
 	if (rnp_root != rnp)
@@ -3899,12 +3910,16 @@ static int __init rcu_spawn_gp_kthread(void)
 	struct task_struct *t;
 
 	/* Force priority into range. */
-	if (IS_ENABLED(CONFIG_RCU_BOOST) && kthread_prio < 1)
+	if (IS_ENABLED(CONFIG_RCU_BOOST) && kthread_prio < 2
+	    && IS_BUILTIN(CONFIG_RCU_TORTURE_TEST))
+		kthread_prio = 2;
+	else if (IS_ENABLED(CONFIG_RCU_BOOST) && kthread_prio < 1)
 		kthread_prio = 1;
 	else if (kthread_prio < 0)
 		kthread_prio = 0;
 	else if (kthread_prio > 99)
 		kthread_prio = 99;
+
 	if (kthread_prio != kthread_prio_in)
 		pr_alert("rcu_spawn_gp_kthread(): Limited prio to %d from %d\n",
 			 kthread_prio, kthread_prio_in);
