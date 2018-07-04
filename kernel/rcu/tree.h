@@ -61,7 +61,6 @@ struct rcu_dynticks {
 /* Communicate arguments to a workqueue handler. */
 struct rcu_exp_work {
 	smp_call_func_t rew_func;
-	struct rcu_state *rew_rsp;
 	unsigned long rew_s;
 	struct work_struct rew_work;
 };
@@ -266,7 +265,6 @@ struct rcu_data {
 	short rcu_onl_gp_flags;		/* ->gp_flags at last online. */
 
 	int cpu;
-	struct rcu_state *rsp;
 };
 
 /* Values for nocb_defer_wakeup field in struct rcu_data. */
@@ -362,7 +360,6 @@ struct rcu_state {
 						/*  jiffies. */
 	const char *name;			/* Name of structure. */
 	char abbr;				/* Abbreviated name. */
-	struct list_head flavors;		/* List of RCU flavors. */
 
 	spinlock_t ofl_lock ____cacheline_internodealigned_in_smp;
 						/* Synchronize offline with */
@@ -419,12 +416,6 @@ static const char *tp_rcu_varname __used __tracepoint_string = rcu_name;
 #define RCU_NAME rcu_name
 #endif /* #else #ifdef CONFIG_TRACING */
 
-extern struct list_head rcu_struct_flavors;
-
-/* Sequence through rcu_state structures for each RCU flavor. */
-#define for_each_rcu_flavor(rsp) \
-	list_for_each_entry((rsp), &rcu_struct_flavors, flavors)
-
 /*
  * RCU implementation internal declarations:
  */
@@ -452,23 +443,17 @@ static int rcu_preempt_blocked_readers_cgp(struct rcu_node *rnp);
 #ifdef CONFIG_HOTPLUG_CPU
 static bool rcu_preempt_has_tasks(struct rcu_node *rnp);
 #endif /* #ifdef CONFIG_HOTPLUG_CPU */
-static void rcu_print_detail_task_stall(struct rcu_state *rsp);
+static void rcu_print_detail_task_stall(void);
 static int rcu_print_task_stall(struct rcu_node *rnp);
 static int rcu_print_task_exp_stall(struct rcu_node *rnp);
-static void rcu_preempt_check_blocked_tasks(struct rcu_state *rsp,
-					    struct rcu_node *rnp);
+static void rcu_preempt_check_blocked_tasks(struct rcu_node *rnp);
 static void rcu_flavor_check_callbacks(int user);
 void call_rcu(struct rcu_head *head, rcu_callback_t func);
-static void dump_blkd_tasks(struct rcu_state *rsp, struct rcu_node *rnp,
-			    int ncheck);
+static void dump_blkd_tasks(struct rcu_node *rnp, int ncheck);
 static void rcu_initiate_boost(struct rcu_node *rnp, unsigned long flags);
 static void rcu_preempt_boost_start_gp(struct rcu_node *rnp);
 static void invoke_rcu_callbacks_kthread(void);
 static bool rcu_is_callbacks_kthread(void);
-#ifdef CONFIG_RCU_BOOST
-static int rcu_spawn_one_boost_kthread(struct rcu_state *rsp,
-						 struct rcu_node *rnp);
-#endif /* #ifdef CONFIG_RCU_BOOST */
 static void __init rcu_spawn_boost_kthreads(void);
 static void rcu_prepare_kthreads(int cpu);
 static void rcu_cleanup_after_idle(void);
@@ -478,11 +463,10 @@ static bool rcu_preempt_has_tasks(struct rcu_node *rnp);
 static bool rcu_preempt_need_deferred_qs(struct task_struct *t);
 static void rcu_preempt_deferred_qs(struct task_struct *t);
 static void print_cpu_stall_info_begin(void);
-static void print_cpu_stall_info(struct rcu_state *rsp, int cpu);
+static void print_cpu_stall_info(int cpu);
 static void print_cpu_stall_info_end(void);
 static void zero_cpu_stall_ticks(struct rcu_data *rdp);
-static void increment_cpu_stall_ticks(void);
-static bool rcu_nocb_cpu_needs_barrier(struct rcu_state *rsp, int cpu);
+static bool rcu_nocb_cpu_needs_barrier(int cpu);
 static struct swait_queue_head *rcu_nocb_gp_get(struct rcu_node *rnp);
 static void rcu_nocb_gp_cleanup(struct swait_queue_head *sq);
 static void rcu_init_one_nocb(struct rcu_node *rnp);
@@ -497,11 +481,11 @@ static void rcu_boot_init_nocb_percpu_data(struct rcu_data *rdp);
 static void rcu_spawn_all_nocb_kthreads(int cpu);
 static void __init rcu_spawn_nocb_kthreads(void);
 #ifdef CONFIG_RCU_NOCB_CPU
-static void __init rcu_organize_nocb_kthreads(struct rcu_state *rsp);
+static void __init rcu_organize_nocb_kthreads(void);
 #endif /* #ifdef CONFIG_RCU_NOCB_CPU */
 static bool init_nocb_callback_list(struct rcu_data *rdp);
 static void rcu_bind_gp_kthread(void);
-static bool rcu_nohz_full_cpu(struct rcu_state *rsp);
+static bool rcu_nohz_full_cpu(void);
 static void rcu_dynticks_task_enter(void);
 static void rcu_dynticks_task_exit(void);
 

@@ -66,13 +66,16 @@ MODULE_AUTHOR("Paul E. McKenney <paulmck@us.ibm.com> and Josh Triplett <josh@jos
 /* Bits for ->extendables field, extendables param, and related definitions. */
 #define RCUTORTURE_RDR_SHIFT	 8	/* Put SRCU index in upper bits. */
 #define RCUTORTURE_RDR_MASK	 ((1 << RCUTORTURE_RDR_SHIFT) - 1)
-#define RCUTORTURE_RDR_BH	 0x1	/* Extend readers by disabling bh. */
-#define RCUTORTURE_RDR_IRQ	 0x2	/*  ... disabling interrupts. */
-#define RCUTORTURE_RDR_PREEMPT	 0x4	/*  ... disabling preemption. */
-#define RCUTORTURE_RDR_RCU	 0x8	/*  ... entering another RCU reader. */
-#define RCUTORTURE_RDR_NBITS	 4	/* Number of bits defined above. */
-#define RCUTORTURE_MAX_EXTEND	 (RCUTORTURE_RDR_BH | RCUTORTURE_RDR_IRQ | \
-				  RCUTORTURE_RDR_PREEMPT)
+#define RCUTORTURE_RDR_BH	 0x01	/* Extend readers by disabling bh. */
+#define RCUTORTURE_RDR_IRQ	 0x02	/*  ... disabling interrupts. */
+#define RCUTORTURE_RDR_PREEMPT	 0x04	/*  ... disabling preemption. */
+#define RCUTORTURE_RDR_RBH	 0x08	/*  ... rcu_read_lock_bh(). */
+#define RCUTORTURE_RDR_SCHED	 0x10	/*  ... rcu_read_lock_sched(). */
+#define RCUTORTURE_RDR_RCU	 0x20	/*  ... entering another RCU reader. */
+#define RCUTORTURE_RDR_NBITS	 6	/* Number of bits defined above. */
+#define RCUTORTURE_MAX_EXTEND	 \
+	(RCUTORTURE_RDR_BH | RCUTORTURE_RDR_IRQ | RCUTORTURE_RDR_PREEMPT | \
+	 RCUTORTURE_RDR_RBH | RCUTORTURE_RDR_SCHED)
 #define RCUTORTURE_RDR_MAX_LOOPS 0x7	/* Maximum reader extensions. */
 					/* Must be power of two minus one. */
 
@@ -131,7 +134,7 @@ torture_param(int, verbose, 1,
 
 static char *torture_type = "rcu";
 module_param(torture_type, charp, 0444);
-MODULE_PARM_DESC(torture_type, "Type of RCU to torture (rcu, rcu_bh, ...)");
+MODULE_PARM_DESC(torture_type, "Type of RCU to torture (rcu, srcu, ...)");
 
 static int nrealreaders;
 static int ncbflooders;
@@ -447,47 +450,6 @@ static struct rcu_torture_ops rcu_ops = {
 };
 
 /*
- * Definitions for rcu_bh torture testing.
- */
-
-static int rcu_bh_torture_read_lock(void) __acquires(RCU_BH)
-{
-	rcu_read_lock_bh();
-	return 0;
-}
-
-static void rcu_bh_torture_read_unlock(int idx) __releases(RCU_BH)
-{
-	rcu_read_unlock_bh();
-}
-
-static void rcu_bh_torture_deferred_free(struct rcu_torture *p)
-{
-	call_rcu_bh(&p->rtort_rcu, rcu_torture_cb);
-}
-
-static struct rcu_torture_ops rcu_bh_ops = {
-	.ttype		= RCU_BH_FLAVOR,
-	.init		= rcu_sync_torture_init,
-	.readlock	= rcu_bh_torture_read_lock,
-	.read_delay	= rcu_read_delay,  /* just reuse rcu's version. */
-	.readunlock	= rcu_bh_torture_read_unlock,
-	.get_gp_seq	= rcu_bh_get_gp_seq,
-	.gp_diff	= rcu_seq_diff,
-	.deferred_free	= rcu_bh_torture_deferred_free,
-	.sync		= synchronize_rcu_bh,
-	.exp_sync	= synchronize_rcu_bh_expedited,
-	.call		= call_rcu_bh,
-	.cb_barrier	= rcu_barrier_bh,
-	.fqs		= rcu_bh_force_quiescent_state,
-	.stats		= NULL,
-	.irq_capable	= 1,
-	.extendables	= (RCUTORTURE_RDR_BH | RCUTORTURE_RDR_IRQ),
-	.ext_irq_conflict = RCUTORTURE_RDR_RCU,
-	.name		= "rcu_bh"
-};
-
-/*
  * Don't even think about trying any of these in real life!!!
  * The names includes "busted", and they really means it!
  * The only purpose of these functions is to provide a buggy RCU
@@ -672,48 +634,6 @@ static struct rcu_torture_ops busted_srcud_ops = {
 	.irq_capable	= 1,
 	.extendables	= RCUTORTURE_MAX_EXTEND,
 	.name		= "busted_srcud"
-};
-
-/*
- * Definitions for sched torture testing.
- */
-
-static int sched_torture_read_lock(void)
-{
-	preempt_disable();
-	return 0;
-}
-
-static void sched_torture_read_unlock(int idx)
-{
-	preempt_enable();
-}
-
-static void rcu_sched_torture_deferred_free(struct rcu_torture *p)
-{
-	call_rcu_sched(&p->rtort_rcu, rcu_torture_cb);
-}
-
-static struct rcu_torture_ops sched_ops = {
-	.ttype		= RCU_SCHED_FLAVOR,
-	.init		= rcu_sync_torture_init,
-	.readlock	= sched_torture_read_lock,
-	.read_delay	= rcu_read_delay,  /* just reuse rcu's version. */
-	.readunlock	= sched_torture_read_unlock,
-	.get_gp_seq	= rcu_sched_get_gp_seq,
-	.gp_diff	= rcu_seq_diff,
-	.deferred_free	= rcu_sched_torture_deferred_free,
-	.sync		= synchronize_sched,
-	.exp_sync	= synchronize_sched_expedited,
-	.get_state	= get_state_synchronize_sched,
-	.cond_sync	= cond_synchronize_sched,
-	.call		= call_rcu_sched,
-	.cb_barrier	= rcu_barrier_sched,
-	.fqs		= rcu_sched_force_quiescent_state,
-	.stats		= NULL,
-	.irq_capable	= 1,
-	.extendables	= RCUTORTURE_MAX_EXTEND,
-	.name		= "sched"
 };
 
 /*
@@ -1226,6 +1146,10 @@ static void rcutorture_one_extend(int *readstate, int newstate,
 		local_irq_disable();
 	if (statesnew & RCUTORTURE_RDR_PREEMPT)
 		preempt_disable();
+	if (statesnew & RCUTORTURE_RDR_RBH)
+		rcu_read_lock_bh();
+	if (statesnew & RCUTORTURE_RDR_SCHED)
+		rcu_read_lock_sched();
 	if (statesnew & RCUTORTURE_RDR_RCU)
 		idxnew = cur_ops->readlock() << RCUTORTURE_RDR_SHIFT;
 
@@ -1236,6 +1160,10 @@ static void rcutorture_one_extend(int *readstate, int newstate,
 		local_bh_enable();
 	if (statesold & RCUTORTURE_RDR_PREEMPT)
 		preempt_enable();
+	if (statesold & RCUTORTURE_RDR_RBH)
+		rcu_read_unlock_bh();
+	if (statesold & RCUTORTURE_RDR_SCHED)
+		rcu_read_unlock_sched();
 	if (statesold & RCUTORTURE_RDR_RCU)
 		cur_ops->readunlock(idxold >> RCUTORTURE_RDR_SHIFT);
 
@@ -1278,10 +1206,11 @@ rcutorture_extend_mask(int oldmask, struct torture_random_state *trsp)
 		mask = mask & randmask2;
 	else
 		mask = mask & (1 << (randmask2 % RCUTORTURE_RDR_NBITS));
+	/* Can't enable bh w/irq disabled. */
 	if ((mask & RCUTORTURE_RDR_IRQ) &&
-	    !(mask & RCUTORTURE_RDR_BH) &&
-	    (oldmask & RCUTORTURE_RDR_BH))
-		mask |= RCUTORTURE_RDR_BH; /* Can't enable bh w/irq disabled. */
+	    ((!(mask & RCUTORTURE_RDR_BH) && (oldmask & RCUTORTURE_RDR_BH)) ||
+	     (!(mask & RCUTORTURE_RDR_RBH) && (oldmask & RCUTORTURE_RDR_RBH))))
+		mask |= RCUTORTURE_RDR_BH | RCUTORTURE_RDR_RBH;
 	if ((mask & RCUTORTURE_RDR_IRQ) &&
 	    !(mask & cur_ops->ext_irq_conflict) &&
 	    (oldmask & cur_ops->ext_irq_conflict))
@@ -2082,8 +2011,8 @@ rcu_torture_init(void)
 	int cpu;
 	int firsterr = 0;
 	static struct rcu_torture_ops *torture_ops[] = {
-		&rcu_ops, &rcu_bh_ops, &rcu_busted_ops, &srcu_ops, &srcud_ops,
-		&busted_srcud_ops, &sched_ops, &tasks_ops,
+		&rcu_ops, &rcu_busted_ops, &srcu_ops, &srcud_ops,
+		&busted_srcud_ops, &tasks_ops,
 	};
 
 	if (!torture_init_begin(torture_type, verbose))
