@@ -259,13 +259,13 @@ static void rcu_report_exp_cpu_mult(struct rcu_state *rsp, struct rcu_node *rnp,
 /*
  * Report expedited quiescent state for specified rcu_data (CPU).
  */
-static void rcu_report_exp_rdp(struct rcu_state *rsp, struct rcu_data *rdp,
-			       bool wake)
+static void rcu_report_exp_rdp(struct rcu_state *rsp, struct rcu_data *rdp)
 {
-	rcu_report_exp_cpu_mult(rsp, rdp->mynode, rdp->grpmask, wake);
+	WRITE_ONCE(rdp->deferred_qs, false);
+	rcu_report_exp_cpu_mult(rsp, rdp->mynode, rdp->grpmask, true);
 }
 
-/* Common code for synchronize_{rcu,sched}_expedited() work-done checking. */
+/* Common code for work-done checking. */
 static bool sync_exp_work_done(struct rcu_state *rsp, unsigned long s)
 {
 	if (rcu_exp_gp_seq_done(rsp, s)) {
@@ -286,7 +286,7 @@ static bool sync_exp_work_done(struct rcu_state *rsp, unsigned long s)
  */
 static bool exp_funnel_lock(struct rcu_state *rsp, unsigned long s)
 {
-	struct rcu_data *rdp = per_cpu_ptr(rsp->rda, raw_smp_processor_id());
+	struct rcu_data *rdp = per_cpu_ptr(&rcu_data, raw_smp_processor_id());
 	struct rcu_node *rnp = rdp->mynode;
 	struct rcu_node *rnp_root = rcu_get_root(rsp);
 
@@ -337,45 +337,6 @@ fastpath:
 	return false;
 }
 
-/* Invoked on each online non-idle CPU for expedited quiescent state. */
-static void sync_sched_exp_handler(void *data)
-{
-	struct rcu_data *rdp;
-	struct rcu_node *rnp;
-	struct rcu_state *rsp = data;
-
-	rdp = this_cpu_ptr(rsp->rda);
-	rnp = rdp->mynode;
-	if (!(READ_ONCE(rnp->expmask) & rdp->grpmask) ||
-	    __this_cpu_read(rcu_sched_data.cpu_no_qs.b.exp))
-		return;
-	if (rcu_is_cpu_rrupt_from_idle()) {
-		rcu_report_exp_rdp(&rcu_sched_state,
-				   this_cpu_ptr(&rcu_sched_data), true);
-		return;
-	}
-	__this_cpu_write(rcu_sched_data.cpu_no_qs.b.exp, true);
-	/* Store .exp before .rcu_urgent_qs. */
-	smp_store_release(this_cpu_ptr(&rcu_dynticks.rcu_urgent_qs), true);
-	resched_cpu(smp_processor_id());
-}
-
-/* Send IPI for expedited cleanup if needed at end of CPU-hotplug operation. */
-static void sync_sched_exp_online_cleanup(int cpu)
-{
-	struct rcu_data *rdp;
-	int ret;
-	struct rcu_node *rnp;
-	struct rcu_state *rsp = &rcu_sched_state;
-
-	rdp = per_cpu_ptr(rsp->rda, cpu);
-	rnp = rdp->mynode;
-	if (!(READ_ONCE(rnp->expmask) & rdp->grpmask))
-		return;
-	ret = smp_call_function_single(cpu, sync_sched_exp_handler, rsp, 0);
-	WARN_ON_ONCE(ret);
-}
-
 /*
  * Select the CPUs within the specified rcu_node that the upcoming
  * expedited grace period needs to wait for.
@@ -400,7 +361,7 @@ static void sync_rcu_exp_select_node_cpus(struct work_struct *wp)
 	mask_ofl_test = 0;
 	for_each_leaf_node_cpu_mask(rnp, cpu, rnp->expmask) {
 		unsigned long mask = leaf_node_cpu_bit(rnp, cpu);
-		struct rcu_data *rdp = per_cpu_ptr(rsp->rda, cpu);
+		struct rcu_data *rdp = per_cpu_ptr(&rcu_data, cpu);
 		struct rcu_dynticks *rdtp = per_cpu_ptr(&rcu_dynticks, cpu);
 		int snap;
 
@@ -429,7 +390,7 @@ static void sync_rcu_exp_select_node_cpus(struct work_struct *wp)
 	/* IPI the remaining CPUs for expedited quiescent state. */
 	for_each_leaf_node_cpu_mask(rnp, cpu, rnp->expmask) {
 		unsigned long mask = leaf_node_cpu_bit(rnp, cpu);
-		struct rcu_data *rdp = per_cpu_ptr(rsp->rda, cpu);
+		struct rcu_data *rdp = per_cpu_ptr(&rcu_data, cpu);
 
 		if (!(mask_ofl_ipi & mask))
 			continue;
@@ -548,7 +509,7 @@ static void synchronize_sched_expedited_wait(struct rcu_state *rsp)
 				if (!(rnp->expmask & mask))
 					continue;
 				ndetected++;
-				rdp = per_cpu_ptr(rsp->rda, cpu);
+				rdp = per_cpu_ptr(&rcu_data, cpu);
 				pr_cont(" %d-%c%c%c", cpu,
 					"O."[!!cpu_online(cpu)],
 					"o."[!!(rdp->grpmask & rnp->expmaskinit)],
@@ -660,7 +621,7 @@ static void _synchronize_rcu_expedited(struct rcu_state *rsp,
 
 	/* If expedited grace periods are prohibited, fall back to normal. */
 	if (rcu_gp_is_normal()) {
-		wait_rcu_gp(rsp->call);
+		wait_rcu_gp(call_rcu);
 		return;
 	}
 
@@ -683,7 +644,7 @@ static void _synchronize_rcu_expedited(struct rcu_state *rsp,
 	}
 
 	/* Wait for expedited grace period to complete. */
-	rdp = per_cpu_ptr(rsp->rda, raw_smp_processor_id());
+	rdp = per_cpu_ptr(&rcu_data, raw_smp_processor_id());
 	rnp = rcu_get_root(rsp);
 	wait_event(rnp->exp_wq[rcu_seq_ctr(s) & 0x3],
 		   sync_exp_work_done(rsp, s));
@@ -692,39 +653,6 @@ static void _synchronize_rcu_expedited(struct rcu_state *rsp,
 	/* Let the next expedited grace period start. */
 	mutex_unlock(&rsp->exp_mutex);
 }
-
-/**
- * synchronize_sched_expedited - Brute-force RCU-sched grace period
- *
- * Wait for an RCU-sched grace period to elapse, but use a "big hammer"
- * approach to force the grace period to end quickly.  This consumes
- * significant time on all CPUs and is unfriendly to real-time workloads,
- * so is thus not recommended for any sort of common-case code.  In fact,
- * if you are using synchronize_sched_expedited() in a loop, please
- * restructure your code to batch your updates, and then use a single
- * synchronize_sched() instead.
- *
- * This implementation can be thought of as an application of sequence
- * locking to expedited grace periods, but using the sequence counter to
- * determine when someone else has already done the work instead of for
- * retrying readers.
- */
-void synchronize_sched_expedited(void)
-{
-	struct rcu_state *rsp = &rcu_sched_state;
-
-	RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
-			 lock_is_held(&rcu_lock_map) ||
-			 lock_is_held(&rcu_sched_lock_map),
-			 "Illegal synchronize_sched_expedited() in RCU read-side critical section");
-
-	/* If only one CPU, this is automatically a grace period. */
-	if (rcu_blocking_is_gp())
-		return;
-
-	_synchronize_rcu_expedited(rsp, sync_sched_exp_handler);
-}
-EXPORT_SYMBOL_GPL(synchronize_sched_expedited);
 
 #ifdef CONFIG_PREEMPT_RCU
 
@@ -737,32 +665,75 @@ EXPORT_SYMBOL_GPL(synchronize_sched_expedited);
  */
 static void sync_rcu_exp_handler(void *info)
 {
-	struct rcu_data *rdp;
+	unsigned long flags;
 	struct rcu_state *rsp = info;
+	struct rcu_data *rdp = this_cpu_ptr(&rcu_data);
+	struct rcu_node *rnp = rdp->mynode;
 	struct task_struct *t = current;
 
 	/*
-	 * Within an RCU read-side critical section, request that the next
-	 * rcu_read_unlock() report.  Unless this RCU read-side critical
-	 * section has already blocked, in which case it is already set
-	 * up for the expedited grace period to wait on it.
+	 * First, the common case of not being in an RCU read-side
+	 * critical section.  If also enabled or idle, immediately
+	 * report the quiescent state, otherwise defer.
 	 */
-	if (t->rcu_read_lock_nesting > 0 &&
-	    !t->rcu_read_unlock_special.b.blocked) {
-		t->rcu_read_unlock_special.b.exp_need_qs = true;
+	if (!t->rcu_read_lock_nesting) {
+		if (!(preempt_count() & (PREEMPT_MASK | SOFTIRQ_MASK)) ||
+		    rcu_dynticks_curr_cpu_in_eqs()) {
+			rcu_report_exp_rdp(rsp, rdp);
+		} else {
+			rdp->deferred_qs = true;
+			resched_cpu(rdp->cpu);
+		}
 		return;
 	}
 
 	/*
-	 * We are either exiting an RCU read-side critical section (negative
-	 * values of t->rcu_read_lock_nesting) or are not in one at all
-	 * (zero value of t->rcu_read_lock_nesting).  Or we are in an RCU
-	 * read-side critical section that blocked before this expedited
-	 * grace period started.  Either way, we can immediately report
-	 * the quiescent state.
+	 * Second, the less-common case of being in an RCU read-side
+	 * critical section.  In this case we can count on a future
+	 * rcu_read_unlock().  However, this rcu_read_unlock() might
+	 * execute on some other CPU, but in that case there will be
+	 * a future context switch.  Either way, if the expedited
+	 * grace period is still waiting on this CPU, set ->deferred_qs
+	 * so that the eventual quiescent state will be reported.
+	 * Note that there is a large group of race conditions that
+	 * can have caused this quiescent state to already have been
+	 * reported, so we really do need to check ->expmask.
 	 */
-	rdp = this_cpu_ptr(rsp->rda);
-	rcu_report_exp_rdp(rsp, rdp, true);
+	if (t->rcu_read_lock_nesting > 0) {
+		raw_spin_lock_irqsave_rcu_node(rnp, flags);
+		if (rnp->expmask & rdp->grpmask)
+			rdp->deferred_qs = true;
+		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
+	}
+
+	/*
+	 * The final and least likely case is where the interrupted
+	 * code was just about to or just finished exiting the RCU-preempt
+	 * read-side critical section, and no, we can't tell which.
+	 * So either way, set ->deferred_qs to flag later code that
+	 * a quiescent state is required.
+	 *
+	 * If the CPU is fully enabled (or if some buggy RCU-preempt
+	 * read-side critical section is being used from idle), just
+	 * invoke rcu_preempt_defer_qs() to immediately report the
+	 * quiescent state.  We cannot use rcu_read_unlock_special()
+	 * because we are in an interrupt handler, which will cause that
+	 * function to take an early exit without doing anything.
+	 *
+	 * Otherwise, use resched_cpu() to force a context switch after
+	 * the CPU enables everything.
+	 */
+	rdp->deferred_qs = true;
+	if (!(preempt_count() & (PREEMPT_MASK | SOFTIRQ_MASK)) ||
+	    WARN_ON_ONCE(rcu_dynticks_curr_cpu_in_eqs()))
+		rcu_preempt_deferred_qs(t);
+	else
+		resched_cpu(rdp->cpu);
+}
+
+/* PREEMPT=y, so no RCU-sched to clean up after. */
+static void sync_sched_exp_online_cleanup(int cpu)
+{
 }
 
 /**
@@ -782,10 +753,12 @@ static void sync_rcu_exp_handler(void *info)
  * you are using synchronize_rcu_expedited() in a loop, please restructure
  * your code to batch your updates, and then Use a single synchronize_rcu()
  * instead.
+ *
+ * This has the same semantics as (but is more brutal than) synchronize_rcu().
  */
 void synchronize_rcu_expedited(void)
 {
-	struct rcu_state *rsp = rcu_state_p;
+	struct rcu_state *rsp = &rcu_state;
 
 	RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
 			 lock_is_held(&rcu_lock_map) ||
@@ -800,13 +773,78 @@ EXPORT_SYMBOL_GPL(synchronize_rcu_expedited);
 
 #else /* #ifdef CONFIG_PREEMPT_RCU */
 
+/* Invoked on each online non-idle CPU for expedited quiescent state. */
+static void sync_sched_exp_handler(void *unused)
+{
+	struct rcu_data *rdp;
+	struct rcu_node *rnp;
+
+	rdp = this_cpu_ptr(&rcu_data);
+	rnp = rdp->mynode;
+	if (!(READ_ONCE(rnp->expmask) & rdp->grpmask) ||
+	    __this_cpu_read(rcu_data.cpu_no_qs.b.exp))
+		return;
+	if (rcu_is_cpu_rrupt_from_idle()) {
+		rcu_report_exp_rdp(&rcu_state, this_cpu_ptr(&rcu_data));
+		return;
+	}
+	__this_cpu_write(rcu_data.cpu_no_qs.b.exp, true);
+	/* Store .exp before .rcu_urgent_qs. */
+	smp_store_release(this_cpu_ptr(&rcu_dynticks.rcu_urgent_qs), true);
+	resched_cpu(smp_processor_id());
+}
+
+/* Send IPI for expedited cleanup if needed at end of CPU-hotplug operation. */
+static void sync_sched_exp_online_cleanup(int cpu)
+{
+	struct rcu_data *rdp;
+	int ret;
+	struct rcu_node *rnp;
+	struct rcu_state *rsp = &rcu_state;
+
+	rdp = per_cpu_ptr(&rcu_data, cpu);
+	rnp = rdp->mynode;
+	if (!(READ_ONCE(rnp->expmask) & rdp->grpmask))
+		return;
+	ret = smp_call_function_single(cpu, sync_sched_exp_handler, rsp, 0);
+	WARN_ON_ONCE(ret);
+}
+
 /*
- * Wait for an rcu-preempt grace period, but make it happen quickly.
- * But because preemptible RCU does not exist, map to rcu-sched.
+ * Because a context switch is a grace period for RCU-sched, any blocking
+ * grace-period wait automatically implies a grace period if there
+ * is only one CPU online at any point time during execution of either
+ * synchronize_sched() or synchronize_rcu_bh().  It is OK to occasionally
+ * incorrectly indicate that there are multiple CPUs online when there
+ * was in fact only one the whole time, as this just adds some overhead:
+ * RCU still operates correctly.
  */
+static int rcu_blocking_is_gp(void)
+{
+	int ret;
+
+	might_sleep();  /* Check for RCU read-side critical section. */
+	preempt_disable();
+	ret = num_online_cpus() <= 1;
+	preempt_enable();
+	return ret;
+}
+
+/* PREEMPT=n implementation of synchronize_rcu_expedited(). */
 void synchronize_rcu_expedited(void)
 {
-	synchronize_sched_expedited();
+	struct rcu_state *rsp = &rcu_state;
+
+	RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
+			 lock_is_held(&rcu_lock_map) ||
+			 lock_is_held(&rcu_sched_lock_map),
+			 "Illegal synchronize_sched_expedited() in RCU read-side critical section");
+
+	/* If only one CPU, this is automatically a grace period. */
+	if (rcu_blocking_is_gp())
+		return;
+
+	_synchronize_rcu_expedited(rsp, sync_sched_exp_handler);
 }
 EXPORT_SYMBOL_GPL(synchronize_rcu_expedited);
 

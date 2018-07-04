@@ -299,7 +299,7 @@ EXPORT_SYMBOL_GPL(rcu_read_lock_held);
  *
  * Check debug_lockdep_rcu_enabled() to prevent false positives during boot.
  *
- * Note that rcu_read_lock() is disallowed if the CPU is either idle or
+ * Note that rcu_read_lock_bh() is disallowed if the CPU is either idle or
  * offline from an RCU perspective, so check for those as well.
  */
 int rcu_read_lock_bh_held(void)
@@ -473,6 +473,7 @@ int rcu_jiffies_till_stall_check(void)
 	}
 	return till_stall_check * HZ + RCU_STALL_DELAY_DELTA;
 }
+EXPORT_SYMBOL_GPL(rcu_jiffies_till_stall_check);
 
 void rcu_sysrq_start(void)
 {

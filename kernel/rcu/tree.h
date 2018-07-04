@@ -195,6 +195,7 @@ struct rcu_data {
 	bool		core_needs_qs;	/* Core waits for quiesc state. */
 	bool		beenonline;	/* CPU online at least once. */
 	bool		gpwrap;		/* Possible ->gp_seq wrap. */
+	bool		deferred_qs;	/* This CPU awaiting a deferred QS? */
 	struct rcu_node *mynode;	/* This CPU's leaf of hierarchy */
 	unsigned long grpmask;		/* Mask to apply to leaf qsmask. */
 	unsigned long	ticks_this_gp;	/* The number of scheduling-clock */
@@ -224,9 +225,6 @@ struct rcu_data {
 
 	/* 5) _rcu_barrier(), OOM callbacks, and expediting. */
 	struct rcu_head barrier_head;
-#ifdef CONFIG_RCU_FAST_NO_HZ
-	struct rcu_head oom_head;
-#endif /* #ifdef CONFIG_RCU_FAST_NO_HZ */
 	int exp_dynticks_snap;		/* Double-check need for IPI. */
 
 	/* 6) Callback offloading. */
@@ -314,8 +312,6 @@ struct rcu_state {
 	struct rcu_node *level[RCU_NUM_LVLS + 1];
 						/* Hierarchy levels (+1 to */
 						/*  shut bogus gcc warning) */
-	struct rcu_data __percpu *rda;		/* pointer of percu rcu_data. */
-	call_rcu_func_t call;			/* call_rcu() flavor. */
 	int ncpus;				/* # CPUs seen so far. */
 
 	/* The following fields are guarded by the root rcu_node's lock. */
@@ -388,7 +384,6 @@ struct rcu_state {
 #define RCU_GP_CLEANUP   7	/* Grace-period cleanup started. */
 #define RCU_GP_CLEANED   8	/* Grace-period cleanup complete. */
 
-#ifndef RCU_TREE_NONCORE
 static const char * const gp_state_names[] = {
 	"RCU_GP_IDLE",
 	"RCU_GP_WAIT_GPS",
@@ -400,7 +395,29 @@ static const char * const gp_state_names[] = {
 	"RCU_GP_CLEANUP",
 	"RCU_GP_CLEANED",
 };
-#endif /* #ifndef RCU_TREE_NONCORE */
+
+/*
+ * In order to export the rcu_state name to the tracing tools, it
+ * needs to be added in the __tracepoint_string section.
+ * This requires defining a separate variable tp_<sname>_varname
+ * that points to the string being used, and this will allow
+ * the tracing userspace tools to be able to decipher the string
+ * address to the matching string.
+ */
+#ifdef CONFIG_PREEMPT_RCU
+#define RCU_ABBR 'p'
+#define RCU_NAME_RAW "rcu_preempt"
+#else /* #ifdef CONFIG_PREEMPT_RCU */
+#define RCU_ABBR 's'
+#define RCU_NAME_RAW "rcu_sched"
+#endif /* #else #ifdef CONFIG_PREEMPT_RCU */
+#ifndef CONFIG_TRACING
+#define RCU_NAME RCU_NAME_RAW
+#else /* #ifdef CONFIG_TRACING */
+static char rcu_name[] = RCU_NAME_RAW;
+static const char *tp_rcu_varname __used __tracepoint_string = rcu_name;
+#define RCU_NAME rcu_name
+#endif /* #else #ifdef CONFIG_TRACING */
 
 extern struct list_head rcu_struct_flavors;
 
@@ -428,11 +445,9 @@ DECLARE_PER_CPU(unsigned int, rcu_cpu_kthread_loops);
 DECLARE_PER_CPU(char, rcu_cpu_has_work);
 #endif /* #ifdef CONFIG_RCU_BOOST */
 
-#ifndef RCU_TREE_NONCORE
-
 /* Forward declarations for rcutree_plugin.h */
 static void rcu_bootup_announce(void);
-static void rcu_preempt_note_context_switch(bool preempt);
+static void rcu_qs(void);
 static int rcu_preempt_blocked_readers_cgp(struct rcu_node *rnp);
 #ifdef CONFIG_HOTPLUG_CPU
 static bool rcu_preempt_has_tasks(struct rcu_node *rnp);
@@ -442,9 +457,8 @@ static int rcu_print_task_stall(struct rcu_node *rnp);
 static int rcu_print_task_exp_stall(struct rcu_node *rnp);
 static void rcu_preempt_check_blocked_tasks(struct rcu_state *rsp,
 					    struct rcu_node *rnp);
-static void rcu_preempt_check_callbacks(void);
+static void rcu_flavor_check_callbacks(int user);
 void call_rcu(struct rcu_head *head, rcu_callback_t func);
-static void __init __rcu_init_preempt(void);
 static void dump_blkd_tasks(struct rcu_state *rsp, struct rcu_node *rnp,
 			    int ncheck);
 static void rcu_initiate_boost(struct rcu_node *rnp, unsigned long flags);
@@ -461,6 +475,8 @@ static void rcu_cleanup_after_idle(void);
 static void rcu_prepare_for_idle(void);
 static void rcu_idle_count_callbacks_posted(void);
 static bool rcu_preempt_has_tasks(struct rcu_node *rnp);
+static bool rcu_preempt_need_deferred_qs(struct task_struct *t);
+static void rcu_preempt_deferred_qs(struct task_struct *t);
 static void print_cpu_stall_info_begin(void);
 static void print_cpu_stall_info(struct rcu_state *rsp, int cpu);
 static void print_cpu_stall_info_end(void);
@@ -496,5 +512,3 @@ void srcu_offline_cpu(unsigned int cpu);
 void srcu_online_cpu(unsigned int cpu) { }
 void srcu_offline_cpu(unsigned int cpu) { }
 #endif /* #else #ifdef CONFIG_SRCU */
-
-#endif /* #ifndef RCU_TREE_NONCORE */

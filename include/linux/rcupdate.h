@@ -49,22 +49,24 @@
 
 /* Exported common interfaces */
 
-#ifdef CONFIG_PREEMPT_RCU
-void call_rcu(struct rcu_head *head, rcu_callback_t func);
-#else /* #ifdef CONFIG_PREEMPT_RCU */
-#define	call_rcu	call_rcu_sched
-#endif /* #else #ifdef CONFIG_PREEMPT_RCU */
-
-void call_rcu_bh(struct rcu_head *head, rcu_callback_t func);
-void call_rcu_sched(struct rcu_head *head, rcu_callback_t func);
+#ifndef CONFIG_TINY_RCU
 void synchronize_sched(void);
+void call_rcu_sched(struct rcu_head *head, rcu_callback_t func);
+#endif
+
+void call_rcu(struct rcu_head *head, rcu_callback_t func);
 void rcu_barrier_tasks(void);
+void synchronize_rcu(void);
+
+static inline void call_rcu_bh(struct rcu_head *head, rcu_callback_t func)
+{
+	call_rcu(head, func);
+}
 
 #ifdef CONFIG_PREEMPT_RCU
 
 void __rcu_read_lock(void);
 void __rcu_read_unlock(void);
-void synchronize_rcu(void);
 
 /*
  * Defined as a macro as it is a very low level header included from
@@ -86,11 +88,6 @@ static inline void __rcu_read_unlock(void)
 	preempt_enable();
 }
 
-static inline void synchronize_rcu(void)
-{
-	synchronize_sched();
-}
-
 static inline int rcu_preempt_depth(void)
 {
 	return 0;
@@ -101,8 +98,6 @@ static inline int rcu_preempt_depth(void)
 /* Internal to kernel */
 void rcu_init(void);
 extern int rcu_scheduler_active __read_mostly;
-void rcu_sched_qs(void);
-void rcu_bh_qs(void);
 void rcu_check_callbacks(int user);
 void rcu_report_dead(unsigned int cpu);
 void rcutree_migrate_callbacks(int cpu);
@@ -322,8 +317,7 @@ static inline void rcu_preempt_sleep_check(void) { }
  * and rcu_assign_pointer().  Some of these could be folded into their
  * callers, but they are left separate in order to ease introduction of
  * multiple flavors of pointers to match the multiple flavors of RCU
- * (e.g., __rcu_bh, * __rcu_sched, and __srcu), should this make sense in
- * the future.
+ * (e.g., __rcu_sched, and __srcu), should this make sense in the future.
  */
 
 #ifdef __CHECKER__
@@ -686,14 +680,10 @@ static inline void rcu_read_unlock(void)
 /**
  * rcu_read_lock_bh() - mark the beginning of an RCU-bh critical section
  *
- * This is equivalent of rcu_read_lock(), but to be used when updates
- * are being done using call_rcu_bh() or synchronize_rcu_bh(). Since
- * both call_rcu_bh() and synchronize_rcu_bh() consider completion of a
- * softirq handler to be a quiescent state, a process in RCU read-side
- * critical section must be protected by disabling softirqs. Read-side
- * critical sections in interrupt context can use just rcu_read_lock(),
- * though this should at least be commented to avoid confusing people
- * reading the code.
+ * This is equivalent of rcu_read_lock(), but also disables softirqs.
+ * Note that synchronize_rcu() and friends may be used for the update
+ * side, although synchronize_rcu_bh() is available as a wrapper in the
+ * short term.  Longer term, the _bh update-side API will be eliminated.
  *
  * Note that rcu_read_lock_bh() and the matching rcu_read_unlock_bh()
  * must occur in the same context, for example, it is illegal to invoke
