@@ -176,8 +176,9 @@ static inline unsigned long rcu_seq_diff(unsigned long new, unsigned long old)
 
 /*
  * debug_rcu_head_queue()/debug_rcu_head_unqueue() are used internally
- * by call_rcu() and rcu callback execution, and are therefore not part of the
- * RCU API. Leaving in rcupdate.h because they are used by all RCU flavors.
+ * by call_rcu() and rcu callback execution, and are therefore not part
+ * of the RCU API. These are in rcupdate.h because they are used by all
+ * RCU implementations.
  */
 
 #ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD
@@ -223,6 +224,7 @@ void kfree(const void *);
  */
 static inline bool __rcu_reclaim(const char *rn, struct rcu_head *head)
 {
+	rcu_callback_t f;
 	unsigned long offset = (unsigned long)head->func;
 
 	rcu_lock_acquire(&rcu_callback_map);
@@ -233,7 +235,9 @@ static inline bool __rcu_reclaim(const char *rn, struct rcu_head *head)
 		return true;
 	} else {
 		RCU_TRACE(trace_rcu_invoke_callback(rn, head);)
-		head->func(head);
+		f = head->func;
+		WRITE_ONCE(head->func, (rcu_callback_t)0L);
+		f(head);
 		rcu_lock_release(&rcu_callback_map);
 		return false;
 	}
@@ -328,7 +332,7 @@ static inline void rcu_init_levelspread(int *levelspread, const int *levelcnt)
 	}
 }
 
-/* Returns first leaf rcu_node of the specified RCU flavor. */
+/* Returns a pointer to the first leaf rcu_node structure. */
 #define rcu_first_leaf_node() (rcu_state.level[rcu_num_lvls - 1])
 
 /* Is this rcu_node a leaf? */
@@ -339,7 +343,8 @@ static inline void rcu_init_levelspread(int *levelspread, const int *levelcnt)
 
 /*
  * Do a full breadth-first scan of the {s,}rcu_node structures for the
- * specified rcu_state structure.
+ * specified state structure (for SRCU) or the only rcu_state structure
+ * (for RCU).
  */
 #define srcu_for_each_node_breadth_first(sp, rnp) \
 	for ((rnp) = &(sp)->node[0]; \
@@ -348,10 +353,10 @@ static inline void rcu_init_levelspread(int *levelspread, const int *levelcnt)
 	srcu_for_each_node_breadth_first(&rcu_state, rnp)
 
 /*
- * Scan the leaves of the rcu_node hierarchy for the specified rcu_state
- * structure.  Note that if there is a singleton rcu_node tree with but
- * one rcu_node structure, this loop -will- visit the rcu_node structure.
- * It is still a leaf node, even if it is also the root node.
+ * Scan the leaves of the rcu_node hierarchy for the rcu_state structure.
+ * Note that if there is a singleton rcu_node tree with but one rcu_node
+ * structure, this loop -will- visit the rcu_node structure.  It is still
+ * a leaf node, even if it is also the root node.
  */
 #define rcu_for_each_leaf_node(rnp) \
 	for ((rnp) = rcu_first_leaf_node(); \
@@ -428,6 +433,12 @@ do {									\
 	lockdep_assert_held(&ACCESS_PRIVATE(p, lock))
 
 #endif /* #if defined(SRCU) || !defined(TINY_RCU) */
+
+#ifdef CONFIG_SRCU
+void srcu_init(void);
+#else /* #ifdef CONFIG_SRCU */
+static inline void srcu_init(void) { }
+#endif /* #else #ifdef CONFIG_SRCU */
 
 #ifdef CONFIG_TINY_RCU
 /* Tiny RCU doesn't expedite, as its purpose in life is instead to be tiny. */
@@ -515,12 +526,14 @@ srcu_batches_completed(struct srcu_struct *sp) { return 0; }
 static inline void rcu_force_quiescent_state(void) { }
 static inline void show_rcu_gp_kthreads(void) { }
 static inline int rcu_get_gp_kthreads_prio(void) { return 0; }
+static inline void rcu_fwd_progress_check(unsigned long j) { }
 #else /* #ifdef CONFIG_TINY_RCU */
 unsigned long rcu_get_gp_seq(void);
 unsigned long rcu_exp_batches_completed(void);
 unsigned long srcu_batches_completed(struct srcu_struct *sp);
 void show_rcu_gp_kthreads(void);
 int rcu_get_gp_kthreads_prio(void);
+void rcu_fwd_progress_check(unsigned long j);
 void rcu_force_quiescent_state(void);
 extern struct workqueue_struct *rcu_gp_wq;
 extern struct workqueue_struct *rcu_par_gp_wq;
@@ -528,8 +541,10 @@ extern struct workqueue_struct *rcu_par_gp_wq;
 
 #ifdef CONFIG_RCU_NOCB_CPU
 bool rcu_is_nocb_cpu(int cpu);
+void rcu_bind_current_to_nocb(void);
 #else
 static inline bool rcu_is_nocb_cpu(int cpu) { return false; }
+static inline void rcu_bind_current_to_nocb(void) { }
 #endif
 
 #endif /* __LINUX_RCU_H */

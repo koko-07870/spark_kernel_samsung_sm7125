@@ -360,14 +360,13 @@ static void sync_rcu_exp_select_node_cpus(struct work_struct *wp)
 	for_each_leaf_node_cpu_mask(rnp, cpu, rnp->expmask) {
 		unsigned long mask = leaf_node_cpu_bit(rnp, cpu);
 		struct rcu_data *rdp = per_cpu_ptr(&rcu_data, cpu);
-		struct rcu_dynticks *rdtp = per_cpu_ptr(&rcu_dynticks, cpu);
 		int snap;
 
 		if (raw_smp_processor_id() == cpu ||
 		    !(rnp->qsmaskinitnext & mask)) {
 			mask_ofl_test |= mask;
 		} else {
-			snap = rcu_dynticks_snap(rdtp);
+			snap = rcu_dynticks_snap(rdp);
 			if (rcu_dynticks_in_eqs(snap))
 				mask_ofl_test |= mask;
 			else
@@ -393,8 +392,7 @@ static void sync_rcu_exp_select_node_cpus(struct work_struct *wp)
 		if (!(mask_ofl_ipi & mask))
 			continue;
 retry_ipi:
-		if (rcu_dynticks_in_eqs_since(rdp->dynticks,
-					      rdp->exp_dynticks_snap)) {
+		if (rcu_dynticks_in_eqs_since(rdp, rdp->exp_dynticks_snap)) {
 			mask_ofl_test |= mask;
 			continue;
 		}
@@ -452,10 +450,12 @@ static void sync_rcu_exp_select_cpus(smp_call_func_t func)
 		}
 		INIT_WORK(&rnp->rew.rew_work, sync_rcu_exp_select_node_cpus);
 		preempt_disable();
-		cpu = cpumask_next(rnp->grplo - 1, cpu_online_mask);
+		cpu = find_next_bit(&rnp->ffmask, BITS_PER_LONG, -1);
 		/* If all offline, queue the work on an unbound CPU. */
-		if (unlikely(cpu > rnp->grphi))
+		if (unlikely(cpu > rnp->grphi - rnp->grplo))
 			cpu = WORK_CPU_UNBOUND;
+		else
+			cpu += rnp->grplo;
 		queue_work_on(cpu, rcu_par_gp_wq, &rnp->rew.rew_work);
 		preempt_enable();
 		rnp->exp_need_flush = true;
@@ -603,8 +603,8 @@ static void wait_rcu_exp_gp(struct work_struct *wp)
 }
 
 /*
- * Given an rcu_state pointer and a smp_call_function() handler, kick
- * off the specified flavor of expedited grace period.
+ * Given a smp_call_function() handler, kick off the specified
+ * implementation of expedited grace period.
  */
 static void _synchronize_rcu_expedited(smp_call_func_t func)
 {
@@ -674,7 +674,8 @@ static void sync_rcu_exp_handler(void *unused)
 			rcu_report_exp_rdp(rdp);
 		} else {
 			rdp->deferred_qs = true;
-			resched_cpu(rdp->cpu);
+			set_tsk_need_resched(t);
+			set_preempt_need_resched();
 		}
 		return;
 	}
@@ -693,9 +694,12 @@ static void sync_rcu_exp_handler(void *unused)
 	 */
 	if (t->rcu_read_lock_nesting > 0) {
 		raw_spin_lock_irqsave_rcu_node(rnp, flags);
-		if (rnp->expmask & rdp->grpmask)
+		if (rnp->expmask & rdp->grpmask) {
 			rdp->deferred_qs = true;
+			WRITE_ONCE(t->rcu_read_unlock_special.b.exp_hint, true);
+		}
 		raw_spin_unlock_irqrestore_rcu_node(rnp, flags);
+		return;
 	}
 
 	/*
@@ -712,18 +716,19 @@ static void sync_rcu_exp_handler(void *unused)
 	 * because we are in an interrupt handler, which will cause that
 	 * function to take an early exit without doing anything.
 	 *
-	 * Otherwise, use resched_cpu() to force a context switch after
-	 * the CPU enables everything.
+	 * Otherwise, force a context switch after the CPU enables everything.
 	 */
 	rdp->deferred_qs = true;
 	if (!(preempt_count() & (PREEMPT_MASK | SOFTIRQ_MASK)) ||
-	    WARN_ON_ONCE(rcu_dynticks_curr_cpu_in_eqs()))
+	    WARN_ON_ONCE(rcu_dynticks_curr_cpu_in_eqs())) {
 		rcu_preempt_deferred_qs(t);
-	else
-		resched_cpu(rdp->cpu);
+	} else {
+		set_tsk_need_resched(t);
+		set_preempt_need_resched();
+	}
 }
 
-/* PREEMPT=y, so no RCU-sched to clean up after. */
+/* PREEMPT=y, so no PREEMPT=n expedited grace period to clean up after. */
 static void sync_sched_exp_online_cleanup(int cpu)
 {
 }
@@ -780,8 +785,9 @@ static void sync_sched_exp_handler(void *unused)
 	}
 	__this_cpu_write(rcu_data.cpu_no_qs.b.exp, true);
 	/* Store .exp before .rcu_urgent_qs. */
-	smp_store_release(this_cpu_ptr(&rcu_dynticks.rcu_urgent_qs), true);
-	resched_cpu(smp_processor_id());
+	smp_store_release(this_cpu_ptr(&rcu_data.rcu_urgent_qs), true);
+	set_tsk_need_resched(current);
+	set_preempt_need_resched();
 }
 
 /* Send IPI for expedited cleanup if needed at end of CPU-hotplug operation. */
@@ -800,13 +806,13 @@ static void sync_sched_exp_online_cleanup(int cpu)
 }
 
 /*
- * Because a context switch is a grace period for RCU-sched, any blocking
- * grace-period wait automatically implies a grace period if there
- * is only one CPU online at any point time during execution of either
- * synchronize_sched() or synchronize_rcu_bh().  It is OK to occasionally
- * incorrectly indicate that there are multiple CPUs online when there
- * was in fact only one the whole time, as this just adds some overhead:
- * RCU still operates correctly.
+ * Because a context switch is a grace period for !PREEMPT, any
+ * blocking grace-period wait automatically implies a grace period if
+ * there is only one CPU online at any point time during execution of
+ * either synchronize_rcu() or synchronize_rcu_expedited().  It is OK to
+ * occasionally incorrectly indicate that there are multiple CPUs online
+ * when there was in fact only one the whole time, as this just adds some
+ * overhead: RCU still operates correctly.
  */
 static int rcu_blocking_is_gp(void)
 {
@@ -825,7 +831,7 @@ void synchronize_rcu_expedited(void)
 	RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
 			 lock_is_held(&rcu_lock_map) ||
 			 lock_is_held(&rcu_sched_lock_map),
-			 "Illegal synchronize_sched_expedited() in RCU read-side critical section");
+			 "Illegal synchronize_rcu_expedited() in RCU read-side critical section");
 
 	/* If only one CPU, this is automatically a grace period. */
 	if (rcu_blocking_is_gp())
