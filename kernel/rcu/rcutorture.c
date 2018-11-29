@@ -312,7 +312,6 @@ struct rcu_torture_ops {
 	int irq_capable;
 	int can_boost;
 	int extendables;
-	int ext_irq_conflict;
 	const char *name;
 };
 
@@ -605,12 +604,7 @@ static void srcu_torture_init(void)
 
 static void srcu_torture_cleanup(void)
 {
-	static DEFINE_TORTURE_RANDOM(rand);
-
-	if (torture_random(&rand) & 0x800)
-		cleanup_srcu_struct(&srcu_ctld);
-	else
-		cleanup_srcu_struct_quiesced(&srcu_ctld);
+	cleanup_srcu_struct(&srcu_ctld);
 	srcu_ctlp = &srcu_ctl; /* In case of a later rcutorture run. */
 }
 
@@ -1168,7 +1162,7 @@ rcutorture_extend_mask(int oldmask, struct torture_random_state *trsp)
 	unsigned long randmask2 = randmask1 >> 3;
 
 	WARN_ON_ONCE(mask >> RCUTORTURE_RDR_SHIFT);
-	/* Most of the time lots of bits, half the time only one bit. */
+	/* Mostly only one bit (need preemption!), sometimes lots of bits. */
 	if (!(randmask1 & 0x7))
 		mask = mask & randmask2;
 	else
@@ -1178,10 +1172,6 @@ rcutorture_extend_mask(int oldmask, struct torture_random_state *trsp)
 	    ((!(mask & RCUTORTURE_RDR_BH) && (oldmask & RCUTORTURE_RDR_BH)) ||
 	     (!(mask & RCUTORTURE_RDR_RBH) && (oldmask & RCUTORTURE_RDR_RBH))))
 		mask |= RCUTORTURE_RDR_BH | RCUTORTURE_RDR_RBH;
-	if ((mask & RCUTORTURE_RDR_IRQ) &&
-	    !(mask & cur_ops->ext_irq_conflict) &&
-	    (oldmask & cur_ops->ext_irq_conflict))
-		mask |= cur_ops->ext_irq_conflict; /* Or if readers object. */
 	return mask ?: RCUTORTURE_RDR_RCU;
 }
 
@@ -1625,21 +1615,34 @@ static bool rcu_fwd_emergency_stop;
 #define MIN_FWD_CB_LAUNDERS	3	/* This many CB invocations to count. */
 #define MIN_FWD_CBS_LAUNDERED	100	/* Number of counted CBs. */
 #define FWD_CBS_HIST_DIV	10	/* Histogram buckets/second. */
-static long n_launders_hist[2 * MAX_FWD_CB_JIFFIES / (HZ / FWD_CBS_HIST_DIV)];
+struct rcu_launder_hist {
+	long n_launders;
+	unsigned long launder_gp_seq;
+};
+#define N_LAUNDERS_HIST (2 * MAX_FWD_CB_JIFFIES / (HZ / FWD_CBS_HIST_DIV))
+static struct rcu_launder_hist n_launders_hist[N_LAUNDERS_HIST];
+static unsigned long rcu_launder_gp_seq_start;
 
 static void rcu_torture_fwd_cb_hist(void)
 {
+	unsigned long gps;
+	unsigned long gps_old;
 	int i;
 	int j;
 
 	for (i = ARRAY_SIZE(n_launders_hist) - 1; i > 0; i--)
-		if (n_launders_hist[i] > 0)
+		if (n_launders_hist[i].n_launders > 0)
 			break;
 	pr_alert("%s: Callback-invocation histogram (duration %lu jiffies):",
 		 __func__, jiffies - rcu_fwd_startat);
-	for (j = 0; j <= i; j++)
-		pr_cont(" %ds/%d: %ld",
-			j + 1, FWD_CBS_HIST_DIV, n_launders_hist[j]);
+	gps_old = rcu_launder_gp_seq_start;
+	for (j = 0; j <= i; j++) {
+		gps = n_launders_hist[j].launder_gp_seq;
+		pr_cont(" %ds/%d: %ld:%ld",
+			j + 1, FWD_CBS_HIST_DIV, n_launders_hist[j].n_launders,
+			rcutorture_seq_diff(gps, gps_old));
+		gps_old = gps;
+	}
 	pr_cont("\n");
 }
 
@@ -1661,7 +1664,8 @@ static void rcu_torture_fwd_cb_cr(struct rcu_head *rhp)
 	i = ((jiffies - rcu_fwd_startat) / (HZ / FWD_CBS_HIST_DIV));
 	if (i >= ARRAY_SIZE(n_launders_hist))
 		i = ARRAY_SIZE(n_launders_hist) - 1;
-	n_launders_hist[i]++;
+	n_launders_hist[i].n_launders++;
+	n_launders_hist[i].launder_gp_seq = cur_ops->get_gp_seq();
 	spin_unlock_irqrestore(&rcu_fwd_lock, flags);
 }
 
@@ -1781,9 +1785,10 @@ static void rcu_torture_fwd_prog_cr(void)
 	n_max_cbs = 0;
 	n_max_gps = 0;
 	for (i = 0; i < ARRAY_SIZE(n_launders_hist); i++)
-		n_launders_hist[i] = 0;
+		n_launders_hist[i].n_launders = 0;
 	cver = READ_ONCE(rcu_torture_current_version);
 	gps = cur_ops->get_gp_seq();
+	rcu_launder_gp_seq_start = gps;
 	while (time_before(jiffies, stopat) &&
 	       !READ_ONCE(rcu_fwd_emergency_stop) && !torture_must_stop()) {
 		rfcp = READ_ONCE(rcu_fwd_cb_head);
@@ -1841,7 +1846,7 @@ static int rcutorture_oom_notify(struct notifier_block *self,
 	WARN(1, "%s invoked upon OOM during forward-progress testing.\n",
 	     __func__);
 	rcu_torture_fwd_cb_hist();
-	rcu_fwd_progress_check(1 + (jiffies - READ_ONCE(rcu_fwd_startat) / 2));
+	rcu_fwd_progress_check(1 + (jiffies - READ_ONCE(rcu_fwd_startat)) / 2);
 	WRITE_ONCE(rcu_fwd_emergency_stop, true);
 	smp_mb(); /* Emergency stop before free and wait to avoid hangs. */
 	pr_info("%s: Freed %lu RCU callbacks.\n",
@@ -2227,6 +2232,14 @@ static void rcu_test_debug_objects(void)
 #endif /* #else #ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD */
 }
 
+static void rcutorture_sync(void)
+{
+	static unsigned long n;
+
+	if (cur_ops->sync && !(++n & 0xfff))
+		cur_ops->sync();
+}
+
 static int __init
 rcu_torture_init(void)
 {
@@ -2389,7 +2402,8 @@ rcu_torture_init(void)
 	firsterr = torture_shutdown_init(shutdown_secs, rcu_torture_cleanup);
 	if (firsterr)
 		goto unwind;
-	firsterr = torture_onoff_init(onoff_holdoff * HZ, onoff_interval);
+	firsterr = torture_onoff_init(onoff_holdoff * HZ, onoff_interval,
+				      rcutorture_sync);
 	if (firsterr)
 		goto unwind;
 	firsterr = rcu_torture_stall_init();
