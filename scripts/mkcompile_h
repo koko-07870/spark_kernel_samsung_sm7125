@@ -87,7 +87,7 @@ UTS_TRUNCATE="cut -b -$UTS_LEN"
 		      | head -n 1 | perl -pe 's/\(http.*?\)//gs' | sed -e 's/  */ /g' -e 's/[[:space:]]*$//')
 
   printf '#define LINUX_COMPILER "%s"\n' "$CC_VERSION, $LD_VERSION"
-) > .tmpcompile
+  ) > .tmpcompile
 
 # Only replace the real compile.h if the new one is different,
 # in order to preserve the timestamp and avoid unnecessary
