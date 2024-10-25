@@ -167,6 +167,7 @@ void dsi_convert_to_drm_mode(const struct dsi_display_mode *dsi_mode,
 #else
 	/* set mode name */
 	*drm_mode->name = '\0';
+#endif
 }
 
 static int dsi_bridge_attach(struct drm_bridge *bridge)
