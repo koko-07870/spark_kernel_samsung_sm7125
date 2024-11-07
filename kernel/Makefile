@@ -119,7 +119,11 @@ obj-$(CONFIG_HAS_IOMEM) += memremap.o
 $(obj)/configs.o: $(obj)/config_data.h
 
 targets += config_data.gz
-$(obj)/config_data.gz: $(KCONFIG_CONFIG) FORCE
+ifeq ($(CONFIG_SEC_A52Q_PROJECT),y)
+$(obj)/config_data.gz: arch/arm64/configs/vendor/lineage-a52q_defconfig FORCE
+else ifeq ($(CONFIG_SEC_A72Q_PROJECT),y)
+$(obj)/config_data.gz: arch/arm64/configs/vendor/lineage-a72q_defconfig FORCE
+endif
 	$(call if_changed,gzip)
 
       filechk_ikconfiggz = (echo "static const char kernel_config_data[] __used = MAGIC_START"; cat $< | scripts/basic/bin2c; echo "MAGIC_END;")
