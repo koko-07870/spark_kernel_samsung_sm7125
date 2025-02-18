@@ -29,7 +29,7 @@ export KBUILD_BUILD_USER="koko"
 # Clang
 clangbin=../clang/bin/clang
 if ! [ -a $clangbin ]; then
-wget -O toolchain.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r530567.tar.gz
+wget -O toolchain.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz
 mkdir -p ${PWD}/../clang
 tar -xzf toolchain.tar.gz -C ${PWD}/../clang
 rm -rf toolchain.tar.gz
