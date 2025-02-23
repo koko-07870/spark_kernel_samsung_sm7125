@@ -4993,7 +4993,7 @@ static ssize_t ss_window_color_store(struct device *dev,
 		goto end;
 	}
 
-	if (sscanf(buf, "%2s", color) != 1) {
+	if (sscanf(buf, "%d", color) != 1) {
 		LCD_ERR("size error\n");
 		return size;
 	}
