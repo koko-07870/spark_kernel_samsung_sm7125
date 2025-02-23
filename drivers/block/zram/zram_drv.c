@@ -62,7 +62,6 @@ static const char *default_compressor = "lzo-rle";
 #endif
 
 static bool is_lzorle;
-static unsigned char lzo_marker[4] = {0x11, 0x00, 0x00};
 
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
