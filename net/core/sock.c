@@ -712,10 +712,10 @@ out:
 static int sock_set_dns_pid(struct sock *sk, char __user *optval, int optlen)
 {
 	int ret = -EADDRNOTAVAIL;
-	struct pid *pid_struct = NULL;
+     /*	struct pid *pid_struct = NULL;
 	struct task_struct *task = NULL;
 	int process_returnValue = -1;
-	char full_process_name[PROCESS_NAME_LEN_NAP] = {0};
+	char full_process_name[PROCESS_NAME_LEN_NAP] = {0}; */
 
 	if (optlen < 0)
 		goto out;
@@ -1623,14 +1623,14 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 	struct sock *sk;
 	
 	/* START_OF_KNOX_NPA */
-	struct pid *pid_struct = NULL;
+      /*struct pid *pid_struct = NULL;
 	struct task_struct *task = NULL;
 	int process_returnValue = -1;
 	char full_process_name[PROCESS_NAME_LEN_NAP] = {0};
 	struct pid *parent_pid_struct = NULL;
 	struct task_struct *parent_task = NULL;
 	int parent_returnValue = -1;
-	char full_parent_process_name[PROCESS_NAME_LEN_NAP] = {0};
+	char full_parent_process_name[PROCESS_NAME_LEN_NAP] = {0};*/
 	/* END_OF_KNOX_NPA */
 
 	sk = sk_prot_alloc(prot, priority | __GFP_ZERO, family);
