@@ -120,9 +120,9 @@ $(obj)/configs.o: $(obj)/config_data.h
 
 targets += config_data.gz
 ifeq ($(CONFIG_SEC_A52Q_PROJECT),y)
-$(obj)/config_data.gz: arch/arm64/configs/vendor/lineage-a52q_defconfig FORCE
+$(obj)/config_data.gz: arch/arm64/configs/vendor/stockish-a52q_defconfig FORCE
 else ifeq ($(CONFIG_SEC_A72Q_PROJECT),y)
-$(obj)/config_data.gz: arch/arm64/configs/vendor/lineage-a72q_defconfig FORCE
+$(obj)/config_data.gz: arch/arm64/configs/vendor/stockish-a72q_defconfig FORCE
 endif
 	$(call if_changed,gzip)
 
