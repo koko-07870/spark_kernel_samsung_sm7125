@@ -3081,7 +3081,7 @@ static void _sde_crtc_set_input_fence_timeout(struct sde_crtc_state *cstate)
 #if defined(CONFIG_DISPLAY_SAMSUNG) || defined(CONFIG_DISPLAY_SAMSUNG_LEGO)
 	/* Increase fence timeout value to 20 sec (case 03381402 / P180412-02009) */
 	cstate->input_fence_timeout_ns *= 2;
-	pr_err("input_fence_timeout_ns %llu \n ", cstate->input_fence_timeout_ns);
+	pr_debug("input_fence_timeout_ns %llu \n ", cstate->input_fence_timeout_ns);
 #endif
 }
 
