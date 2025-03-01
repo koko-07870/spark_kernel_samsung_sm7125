@@ -35,7 +35,7 @@ tar -xzf toolchain.tar.gz -C ${PWD}/../clang
 rm -rf toolchain.tar.gz
 fi
 
-make O=out ARCH=arm64 vendor/pixelos-${DEVICE}_defconfig vendor/debugfs.config
+make O=out ARCH=arm64 vendor/pixelos-${DEVICE}_defconfig
 PATH="${PWD}/../clang/bin:${PATH}" \
 make -j$(nproc --all) O=out \
                       ARCH=arm64 \
