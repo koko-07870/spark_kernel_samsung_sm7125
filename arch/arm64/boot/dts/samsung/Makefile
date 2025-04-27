@@ -9,51 +9,6 @@ SEC_A52Q_EUR_DTBO := \
 		atoll-sec-a52q-eur-overlay-r04.dtbo \
 		atoll-sec-a52q-eur-overlay-r05.dtbo \
 		atoll-sec-a52q-eur-overlay-r06.dtbo
-
-# A52Q LTN
-SEC_A52Q_LTN_DTBO := \
-		atoll-sec-a52q-ltn-overlay-r04.dtbo \
-		atoll-sec-a52q-ltn-overlay-r05.dtbo \
-		atoll-sec-a52q-ltn-overlay-r06.dtbo
-else ifeq ($(filter y,$(CONFIG_SEC_A72Q_PROJECT)),y)
-# A72Q EUR
-SEC_A72Q_EUR_DTBO := \
-		atoll-sec-a72q-eur-overlay-r00.dtbo \
-		atoll-sec-a72q-eur-overlay-r01.dtbo \
-		atoll-sec-a72q-eur-overlay-r02.dtbo \
-		atoll-sec-a72q-eur-overlay-r04.dtbo \
-		atoll-sec-a72q-eur-overlay-r05.dtbo
-
-# A72Q LTN
-SEC_A72Q_LTN_DTBO := \
-		atoll-sec-a72q-ltn-overlay-r00.dtbo \
-		atoll-sec-a72q-ltn-overlay-r01.dtbo \
-		atoll-sec-a72q-ltn-overlay-r02.dtbo \
-		atoll-sec-a72q-ltn-overlay-r04.dtbo \
-		atoll-sec-a72q-ltn-overlay-r05.dtbo
-else ifeq ($(filter y,$(CONFIG_SEC_GTA4XLVE_PROJECT)),y)
-# GTA4XLVE EUR
-SEC_GTA4XLVE_EUR_DTBO := \
-		atoll-sec-gta4xlve-eur-overlay-r00.dtbo
-
-# GTA4XLVEWIFI EUR
-SEC_GTA4XLVEWIFI_EUR_DTBO := \
-		atoll-sec-gta4xlvewifi-eur-overlay-r00.dtbo
-# GTA4XLVE KOR
-SEC_GTA4XLVE_KOR_DTBO := \
-		atoll-sec-gta4xlve-kor-overlay-r00.dtbo
-
-# GTA4XLVE CHN
-SEC_GTA4XLVE_CHN_DTBO := \
-		atoll-sec-gta4xlve-chn-overlay-r00.dtbo
-
-# GTA4XLVEWIFI CHN
-SEC_GTA4XLVEWIFI_CHN_DTBO := \
-		atoll-sec-gta4xlvewifi-chn-overlay-r00.dtbo
-
-# GTA4XLVEWIFI KOR
-SEC_GTA4XLVEWIFI_KOR_DTBO := \
-		atoll-sec-gta4xlvewifi-kor-overlay-r00.dtbo		
 endif
 define __sec_dtbo_build
 dtbo-$(2) += $(1)
@@ -70,33 +25,6 @@ SEC_ATOLL_BASE_DTB := ../qcom/atoll-ab-idp.dtb
 ifeq ($(filter y,$(CONFIG_SEC_A52Q_PROJECT)),y)
 $(eval $(call sec_dtbo_build, \
 		$(SEC_A52Q_EUR_DTBO),$(CONFIG_SEC_A52Q_EUR_OPEN),$(SEC_ATOLL_BASE_DTB)))
-
-$(eval $(call sec_dtbo_build, \
-		$(SEC_A52Q_LTN_DTBO),$(CONFIG_SEC_A52Q_LTN_OPEN),$(SEC_ATOLL_BASE_DTB)))
-else ifeq ($(filter y,$(CONFIG_SEC_A72Q_PROJECT)),y)
-$(eval $(call sec_dtbo_build, \
-		$(SEC_A72Q_EUR_DTBO),$(CONFIG_SEC_A72Q_EUR_OPEN),$(SEC_ATOLL_BASE_DTB)))
-
-$(eval $(call sec_dtbo_build, \
-		$(SEC_A72Q_LTN_DTBO),$(CONFIG_SEC_A72Q_LTN_OPEN),$(SEC_ATOLL_BASE_DTB)))
-else ifeq ($(filter y,$(CONFIG_SEC_GTA4XLVE_PROJECT)),y)
-$(eval $(call sec_dtbo_build, \
-		$(SEC_GTA4XLVE_EUR_DTBO),$(CONFIG_SEC_GTA4XLVE_EUR_OPEN),$(SEC_ATOLL_BASE_DTB)))
-
-$(eval $(call sec_dtbo_build, \
-		$(SEC_GTA4XLVEWIFI_EUR_DTBO),$(CONFIG_SEC_GTA4XLVEWIFI_EUR_OPEN),$(SEC_ATOLL_BASE_DTB)))
-
-$(eval $(call sec_dtbo_build, \
-		$(SEC_GTA4XLVE_KOR_DTBO),$(CONFIG_SEC_GTA4XLVE_KOR_OPEN),$(SEC_ATOLL_BASE_DTB)))
-
-$(eval $(call sec_dtbo_build, \
-		$(SEC_GTA4XLVE_CHN_DTBO),$(CONFIG_SEC_GTA4XLVE_CHN_OPEN),$(SEC_ATOLL_BASE_DTB)))
-
-$(eval $(call sec_dtbo_build, \
-		$(SEC_GTA4XLVEWIFI_CHN_DTBO),$(CONFIG_SEC_GTA4XLVEWIFI_CHN_OPEN),$(SEC_ATOLL_BASE_DTB)))
-
-$(eval $(call sec_dtbo_build, \
-		$(SEC_GTA4XLVEWIFI_KOR_DTBO),$(CONFIG_SEC_GTA4XLVEWIFI_KOR_OPEN),$(SEC_ATOLL_BASE_DTB)))
 endif
 endif
 
