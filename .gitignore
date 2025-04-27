@@ -129,3 +129,8 @@ kernel/configs/android-*.cfg
 #Ignoring Android.bp link file
 #
 Android.bp
+
+out
+build.sh
+regen.sh
+a52q*.zip
